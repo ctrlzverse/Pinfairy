@@ -1,0 +1,144 @@
+import logging
+import httpx
+from bs4 import BeautifulSoup
+import json
+import re
+import asyncio
+from playwright.async_api import async_playwright
+
+logger = logging.getLogger(__name__)
+
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+    'Accept-Language': 'en-US,en;q=0.5',
+}
+
+def _extract_image_url(pin_data: dict) -> str | None:
+    if not isinstance(pin_data, dict) or not pin_data.get('images'): return None
+    if image_url := pin_data['images'].get('orig', {}).get('url'): return image_url
+    if key := next(iter(pin_data['images']), None): return pin_data['images'][key].get('url')
+    return None
+
+async def get_all_pins_with_pagination(board_url: str) -> dict:
+    all_image_urls = set()
+    PINTEREST_API_ENDPOINT = "https://www.pinterest.com/resource/BoardFeedResource/get/"
+    async with httpx.AsyncClient(headers=HEADERS, timeout=45.0, follow_redirects=True) as client:
+        try:
+            response = await client.get(board_url); response.raise_for_status(); html_content = response.text
+            initial_urls = re.findall(r'"url"\s*:\s*"https://i\.pinimg\.com/originals/[^"]+\.jpg"', html_content)
+            for url_match in initial_urls: all_image_urls.add(url_match.split('"')[-2])
+            board_id_match = re.search(r'"board_id":\s*"(\d+)"', html_content)
+            bookmark_match = re.search(r'"bookmarks":\s*\["([^"]+)"\]', html_content)
+            if not board_id_match or not bookmark_match:
+                return {"is_success": True, "image_urls": list(all_image_urls)} if all_image_urls else {"is_success": False, "message": "Tidak ada gambar & tidak bisa pagination."}
+            board_id = board_id_match.group(1); bookmark = bookmark_match.group(1)
+            while bookmark and bookmark != '-end-':
+                await asyncio.sleep(1)
+                payload = {"options": {"board_id": board_id, "page_size": 25, "bookmarks": [bookmark]}}
+                api_response = await client.get(PINTEREST_API_ENDPOINT, params={'source_url': board_url, 'data': json.dumps(payload)})
+                if api_response.status_code != 200: break
+                api_data = api_response.json()
+                for pin in api_data.get('resource_response', {}).get('data', []):
+                    if images := pin.get('images'):
+                        if orig_image := images.get('orig'): all_image_urls.add(orig_image['url'])
+                bookmark = api_data.get('resource_response', {}).get('bookmark')
+            return {"is_success": True, "image_urls": list(all_image_urls), "board_url": board_url}
+        except Exception as e: return {"is_success": False, "message": f"Terjadi kesalahan saat scraping: {e}"}
+
+async def get_pinterest_photo_data(url: str) -> dict:
+    try:
+        async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True) as client:
+            r = await client.get(url); r.raise_for_status(); soup = BeautifulSoup(r.text, 'html.parser')
+            meta_tag = soup.find('meta', {'property': 'og:image'})
+            if meta_tag and meta_tag.get('content'):
+                return {"is_success": True, "media_url": meta_tag['content'].replace('/236x/', '/originals/').replace('/736x/', '/originals/'), "post_url": url}
+            return {"is_success": False, "message": "Tidak dapat menemukan data foto."}
+    except Exception: return {"is_success": False, "message": "Terjadi kesalahan."}
+
+def find_best_video_url(data):
+    """Mencari semua URL video, memprioritaskan .mp4, dan memilih kualitas terbaik."""
+    videos_found = []
+
+    def _recursive_hunter(item):
+        if isinstance(item, dict):
+            if 'url' in item and isinstance(item['url'], str):
+                url = item['url']
+                if url.endswith('.mp4'):
+                    priority = 1
+                elif '.m3u8' in url:
+                    priority = 0
+                else:
+                    priority = -1
+                
+                if priority >= 0:
+                    height = item.get('height', 0)
+                    if isinstance(height, int):
+                        videos_found.append({'url': url, 'height': height, 'priority': priority})
+
+            for value in item.values():
+                _recursive_hunter(value)
+        elif isinstance(item, list):
+            for i in item:
+                _recursive_hunter(i)
+
+    _recursive_hunter(data)
+
+    if not videos_found:
+        return None
+
+    videos_found.sort(key=lambda x: (x['priority'], x['height']), reverse=True)
+    return videos_found[0]['url']
+
+
+async def get_pinterest_video_data(url: str) -> dict:
+    """Fungsi ini HANYA mencari dan mengunduh VIDEO dengan metode httpx (lama)."""
+    logger.info(f"Memburu VIDEO dari URL (Metode Lama): {url}")
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=HEADERS, follow_redirects=True)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            json_data_script = soup.find('script', {'data-relay-response': 'true'})
+            if not json_data_script:
+                logger.warning("Script data-relay-response tidak ditemukan.")
+                return {"is_success": False, "message": "Format halaman tidak didukung untuk video."}
+
+            data = json.loads(json_data_script.string)
+
+            video_url = find_best_video_url(data)
+            
+            if video_url:
+                logger.info(f"✅ Video .mp4 terbaik ditemukan oleh pemburu: {video_url}")
+                return {"is_success": True, "media_url": video_url, "post_url": url}
+            else:
+                logger.warning("Pemburu tidak menemukan URL video .mp4 yang valid di dalam JSON.")
+                return {"is_success": False, "message": "Link ini bukan video atau video tidak dapat diakses."}
+
+    except Exception as e:
+        logger.error(f"Error di get_pinterest_video_data: {e}")
+        return {"is_success": False, "message": "Terjadi kesalahan saat mengambil data video."}
+
+async def search_pins(query: str, limit: int = 10) -> dict:
+    logger.info(f"Memulai pencarian (metode Playwright) untuk query: '{query}'")
+    search_url = f"https://www.pinterest.com/search/pins/?q={query}"
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            page = await browser.new_page()
+            await page.goto(search_url, timeout=60000)
+            await page.wait_for_selector('[data-test-id="pin-visual-wrapper"]', timeout=30000)
+            await page.evaluate("window.scrollBy(0, 1000)"); await asyncio.sleep(2)
+            html_content = await page.content()
+            await browser.close()
+        found_urls = re.findall(r'https://i\.pinimg\.com/originals[^\s"]+\.jpg', html_content)
+        if not found_urls:
+             found_urls.extend(re.findall(r'https://i\.pinimg\.com/736x[^\s"]+\.jpg', html_content))
+        if not found_urls:
+            return {"is_success": False, "message": "Playwright tidak menemukan URL gambar di halaman."}
+        clean_urls = list(dict.fromkeys(found_urls))
+        results = [{"url": url} for url in clean_urls[:limit]]
+        return {"is_success": True, "pins": results}
+    except Exception as e:
+        logger.error(f"Error di search_pins (Playwright): {e}", exc_info=True)
+        return {"is_success": False, "message": f"Terjadi kesalahan saat scraping dengan Playwright: {e}"}

@@ -1,0 +1,22 @@
+# File: pyproject.toml
+
+[tool.poetry]
+name = "pinfairybot"
+version = "0.1.0"
+description = "A Telegram bot for download everything in pinterest"
+authors = ["aes <aesh.n@outlook.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+telethon = "^1.34.0"
+httpx = "^0.27.0"
+beautifulsoup4 = "^4.12.3"
+psutil = "^5.9.8"
+playwright = "^1.44.0"  
+python-dotenv = "^1.0.1"
+
+[tool.poetry.dev-dependencies]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
