@@ -1,0 +1,12 @@
+[build]
+builder = "nixpacks"
+buildCommand = "pip install -r requirements.txt && playwright install chromium && playwright install-deps chromium"
+
+[deploy]
+startCommand = "python bot.py"
+healthcheckPath = "/"
+restartPolicyType = "on_failure"
+
+[variables]
+PYTHONUNBUFFERED = "1"
+PLAYWRIGHT_BROWSERS_PATH = "/opt/render/project/.cache/ms-playwright"

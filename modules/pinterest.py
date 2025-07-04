@@ -20,30 +20,150 @@ def _extract_image_url(pin_data: dict) -> str | None:
     return None
 
 async def get_all_pins_with_pagination(board_url: str) -> dict:
-    all_image_urls = set()
+    logger.info(f"[Pinterest] Mulai scraping board: {board_url}")
+    all_image_urls = {}  # Dictionary untuk menyimpan URL dengan resolusi tertinggi
     PINTEREST_API_ENDPOINT = "https://www.pinterest.com/resource/BoardFeedResource/get/"
-    async with httpx.AsyncClient(headers=HEADERS, timeout=45.0, follow_redirects=True) as client:
-        try:
-            response = await client.get(board_url); response.raise_for_status(); html_content = response.text
-            initial_urls = re.findall(r'"url"\s*:\s*"https://i\.pinimg\.com/originals/[^"]+\.jpg"', html_content)
-            for url_match in initial_urls: all_image_urls.add(url_match.split('"')[-2])
+    
+    def get_image_resolution(url: str) -> tuple:
+        """Extract resolution from Pinterest URL."""
+        match = re.search(r'/(\d+)x(\d+)/', url)
+        if match:
+            width, height = map(int, match.groups())
+            return width * height
+        return 0
+    
+    def get_original_url(url: str) -> str:
+        """Convert URL to highest resolution."""
+        return re.sub(r'/\d+x\d+/', '/originals/', url)
+    
+    def is_duplicate_image(url1: str, url2: str) -> bool:
+        """Check if two URLs point to the same image."""
+        # Extract base filename without resolution
+        base1 = re.sub(r'/\d+x\d+/', '/', url1).split('/')[-1]
+        base2 = re.sub(r'/\d+x\d+/', '/', url2).split('/')[-1]
+        return base1 == base2
+    
+    try:
+        async with httpx.AsyncClient(headers=HEADERS, timeout=45.0, follow_redirects=True) as client:
+            response = await client.get(board_url)
+            response.raise_for_status()
+            html_content = response.text
+            
+            # Find all image URLs
+            initial_urls = re.findall(r'https://i\.pinimg\.com/[^\s"\']+', html_content)
+            logger.debug(f"[Pinterest] Ditemukan {len(initial_urls)} gambar dari HTML awal.")
+            
+            # Process initial URLs
+            for url in initial_urls:
+                if url.endswith(('.jpg', '.jpeg', '.png')):
+                    # Convert to original resolution
+                    orig_url = get_original_url(url)
+                    
+                    # Check for duplicates
+                    is_duplicate = False
+                    for existing_url in list(all_image_urls.keys()):
+                        if is_duplicate_image(url, existing_url):
+                            is_duplicate = True
+                            break
+                    
+                    if not is_duplicate:
+                        all_image_urls[orig_url] = True
             board_id_match = re.search(r'"board_id":\s*"(\d+)"', html_content)
-            bookmark_match = re.search(r'"bookmarks":\s*\["([^"]+)"\]', html_content)
+            bookmark_match = re.search(r'"bookmarks":\s*\["([^\"]+)"\]', html_content)
+            
             if not board_id_match or not bookmark_match:
-                return {"is_success": True, "image_urls": list(all_image_urls)} if all_image_urls else {"is_success": False, "message": "Tidak ada gambar & tidak bisa pagination."}
-            board_id = board_id_match.group(1); bookmark = bookmark_match.group(1)
+                logger.warning(f"[Pinterest] Board ID atau bookmark tidak ditemukan. Board mungkin private/kosong/format berubah.")
+                if all_image_urls:
+                    return {"is_success": True, "image_urls": list(all_image_urls.keys())}
+                
+                # Fallback ke Playwright jika scraping manual gagal
+                logger.info("[Pinterest] Fallback ke Playwright untuk scraping board.")
+                try:
+                    from playwright.async_api import async_playwright
+                    async with async_playwright() as p:
+                        browser = await p.chromium.launch()
+                        page = await browser.new_page()
+                        await page.goto(board_url, timeout=60000)
+                        await page.wait_for_selector('[data-test-id="pin-visual-wrapper"]', timeout=30000)
+                        await page.evaluate("window.scrollBy(0, 2000)"); await asyncio.sleep(2)
+                        html_content = await page.content()
+                        await browser.close()
+                    
+                    found_urls = re.findall(r'https://i\.pinimg\.com/[^\s"\']+', html_content)
+                    logger.debug(f"[Pinterest] Playwright menemukan {len(found_urls)} gambar di board.")
+                    
+                    # Process Playwright URLs with deduplication
+                    processed_urls = {}
+                    for url in found_urls:
+                        if url.endswith(('.jpg', '.jpeg', '.png')):
+                            orig_url = get_original_url(url)
+                            is_duplicate = False
+                            for existing_url in list(processed_urls.keys()):
+                                if is_duplicate_image(url, existing_url):
+                                    is_duplicate = True
+                                    break
+                            if not is_duplicate:
+                                processed_urls[orig_url] = True
+                    
+                    if processed_urls:
+                        return {"is_success": True, "image_urls": list(processed_urls.keys()), "fallback": "playwright"}
+                    else:
+                        return {"is_success": False, "message": "Board kosong/private/format berubah. Tidak ada gambar ditemukan (Playwright)."}
+                except Exception as e:
+                    logger.error(f"[Pinterest] Fallback Playwright gagal: {e}", exc_info=True)
+                    return {"is_success": False, "message": f"Gagal scraping board (Playwright): {e}"}
+            
+            board_id = board_id_match.group(1)
+            bookmark = bookmark_match.group(1)
+            
+            # API pagination with deduplication
             while bookmark and bookmark != '-end-':
                 await asyncio.sleep(1)
                 payload = {"options": {"board_id": board_id, "page_size": 25, "bookmarks": [bookmark]}}
                 api_response = await client.get(PINTEREST_API_ENDPOINT, params={'source_url': board_url, 'data': json.dumps(payload)})
-                if api_response.status_code != 200: break
+                
+                if api_response.status_code != 200:
+                    logger.warning(f"[Pinterest] API Pinterest gagal: {api_response.status_code}")
+                    break
+                
                 api_data = api_response.json()
                 for pin in api_data.get('resource_response', {}).get('data', []):
                     if images := pin.get('images'):
-                        if orig_image := images.get('orig'): all_image_urls.add(orig_image['url'])
+                        # Get highest resolution image
+                        best_url = None
+                        best_resolution = 0
+                        
+                        for size_key, image_data in images.items():
+                            if isinstance(image_data, dict) and 'url' in image_data:
+                                url = image_data['url']
+                                resolution = get_image_resolution(url)
+                                if resolution > best_resolution:
+                                    best_resolution = resolution
+                                    best_url = url
+                        
+                        if best_url:
+                            orig_url = get_original_url(best_url)
+                            
+                            # Check for duplicates
+                            is_duplicate = False
+                            for existing_url in list(all_image_urls.keys()):
+                                if is_duplicate_image(orig_url, existing_url):
+                                    is_duplicate = True
+                                    break
+                            
+                            if not is_duplicate:
+                                all_image_urls[orig_url] = True
+                
                 bookmark = api_data.get('resource_response', {}).get('bookmark')
-            return {"is_success": True, "image_urls": list(all_image_urls), "board_url": board_url}
-        except Exception as e: return {"is_success": False, "message": f"Terjadi kesalahan saat scraping: {e}"}
+            
+            if all_image_urls:
+                return {"is_success": True, "image_urls": list(all_image_urls.keys()), "board_url": board_url}
+            else:
+                logger.warning(f"[Pinterest] Board tidak mengandung gambar setelah pagination.")
+                return {"is_success": False, "message": "Board tidak mengandung gambar setelah pagination."}
+    except Exception as e:
+        logger.error(f"[Pinterest] Terjadi error scraping board: {e}", exc_info=True)
+        return {"is_success": False, "message": f"Terjadi kesalahan saat scraping: {e}"}
 
 async def get_pinterest_photo_data(url: str) -> dict:
     try:

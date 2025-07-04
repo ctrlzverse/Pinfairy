@@ -1,4 +1,4 @@
-import logging, os, glob, time, sqlite3, zipfile, shutil, asyncio, httpx, re, psutil, platform
+import logging, os, glob, time, sqlite3, zipfile, shutil, asyncio, httpx, re, psutil, platform, math, json
 from datetime import datetime
 from telethon import events
 from telethon.tl.custom import Button
@@ -9,12 +9,403 @@ logger = logging.getLogger(__name__)
 DB_FILE = "bot_stats.db"; FORCE_SUB_CHANNEL = os.getenv("FORCE_SUB_CHANNEL", "@aes_hub"); DOWNLOADS_DIR = "downloads"
 URL_PATTERN = re.compile(r'https?://[^\s]+'); BOT_START_TIME = datetime.utcnow()
 
+# Rate limiting storage
+user_last_request = {}
+RATE_LIMIT_SECONDS = 3  # Minimum 3 seconds between requests per user
+
+def validate_pinterest_url(url: str) -> dict:
+    """Validate if URL is a valid Pinterest URL."""
+    if not url or not isinstance(url, str):
+        return {"is_valid": False, "message": "URL tidak valid."}
+    
+    # Clean URL
+    url = url.strip()
+    
+    # Check if it's a valid URL format
+    if not re.match(r'^https?://', url):
+        return {"is_valid": False, "message": "URL harus dimulai dengan http:// atau https://"}
+    
+    # Check if it's Pinterest domain
+    pinterest_domains = ['pinterest.com', 'pin.it', 'www.pinterest.com']
+    if not any(domain in url for domain in pinterest_domains):
+        return {"is_valid": False, "message": "URL harus dari domain Pinterest (pinterest.com atau pin.it)"}
+    
+    # Check URL length (prevent extremely long URLs)
+    if len(url) > 2000:
+        return {"is_valid": False, "message": "URL terlalu panjang."}
+    
+    return {"is_valid": True, "url": url}
+
+def check_rate_limit(user_id: int) -> dict:
+    """Check if user is rate limited."""
+    current_time = time.time()
+    
+    if user_id in user_last_request:
+        time_diff = current_time - user_last_request[user_id]
+        if time_diff < RATE_LIMIT_SECONDS:
+            remaining = RATE_LIMIT_SECONDS - time_diff
+            return {
+                "allowed": False, 
+                "message": f"⏳ Tunggu {remaining:.1f} detik sebelum request berikutnya."
+            }
+    
+    user_last_request[user_id] = current_time
+    return {"allowed": True}
+
+# Database constants
+DEFAULT_DAILY_QUOTA = 100
+DEFAULT_SETTINGS = {
+    "language": "id",
+    "notifications": True,
+    "download_quality": "high"
+}
+
 def init_db():
-    with sqlite3.connect(DB_FILE) as con: cur = con.cursor(); cur.execute("CREATE TABLE IF NOT EXISTS download_stats (media_type TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0)"); cur.execute("INSERT OR IGNORE INTO download_stats (media_type, count) VALUES ('photo', 0)"); cur.execute("INSERT OR IGNORE INTO download_stats (media_type, count) VALUES ('video', 0)"); cur.execute("INSERT OR IGNORE INTO download_stats (media_type, count) VALUES ('board', 0)"); con.commit()
+    """Initialize database with all required tables."""
+    with sqlite3.connect(DB_FILE) as con:
+        cur = con.cursor()
+        
+        # Download stats table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS download_stats (
+                media_type TEXT PRIMARY KEY,
+                count INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        cur.execute("INSERT OR IGNORE INTO download_stats (media_type, count) VALUES ('photo', 0)")
+        cur.execute("INSERT OR IGNORE INTO download_stats (media_type, count) VALUES ('video', 0)")
+        cur.execute("INSERT OR IGNORE INTO download_stats (media_type, count) VALUES ('board', 0)")
+        
+        # Users table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                daily_quota INTEGER DEFAULT ?,
+                downloads_today INTEGER DEFAULT 0,
+                total_downloads INTEGER DEFAULT 0,
+                quota_reset_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                settings TEXT DEFAULT ?
+            )
+        """, (DEFAULT_DAILY_QUOTA, json.dumps(DEFAULT_SETTINGS)))
+        
+        # Download history table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS download_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                media_type TEXT,
+                url TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                success BOOLEAN,
+                error_message TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            )
+        """)
+        
+        # Performance metrics table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS performance_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                cpu_usage REAL,
+                memory_usage REAL,
+                disk_usage REAL,
+                response_time REAL,
+                error_count INTEGER DEFAULT 0
+            )
+        """)
+        
+        con.commit()
+
 def increment_stat(media_type: str, amount: int = 1):
-    with sqlite3.connect(DB_FILE) as con: con.cursor().execute("UPDATE download_stats SET count = count + ? WHERE media_type = ?", (amount, media_type)); con.commit()
+    """Increment download statistics."""
+    with sqlite3.connect(DB_FILE) as con:
+        con.cursor().execute(
+            "UPDATE download_stats SET count = count + ? WHERE media_type = ?",
+            (amount, media_type)
+        )
+        con.commit()
+
 def get_stats():
-    with sqlite3.connect(DB_FILE) as con: cur = con.cursor(); cur.execute("SELECT media_type, count FROM download_stats"); return {row[0]: row[1] for row in cur.fetchall()}
+    """Get global download statistics."""
+    with sqlite3.connect(DB_FILE) as con:
+        cur = con.cursor()
+        cur.execute("SELECT media_type, count FROM download_stats")
+        return {row[0]: row[1] for row in cur.fetchall()}
+
+def get_user_profile(user_id: int) -> dict:
+    """Get user profile and statistics."""
+    with sqlite3.connect(DB_FILE) as con:
+        cur = con.cursor()
+        cur.execute("""
+            SELECT username, first_seen, last_active, daily_quota, 
+                   downloads_today, total_downloads, quota_reset_at, settings
+            FROM users WHERE user_id = ?
+        """, (user_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "username": row[0],
+            "first_seen": row[1],
+            "last_active": row[2],
+            "daily_quota": row[3],
+            "downloads_today": row[4],
+            "total_downloads": row[5],
+            "quota_reset_at": row[6],
+            "settings": json.loads(row[7])
+        }
+
+def update_user_activity(user_id: int, username: str = None):
+    """Update user's last active time and create if not exists."""
+    with sqlite3.connect(DB_FILE) as con:
+        cur = con.cursor()
+        cur.execute("""
+            INSERT INTO users (user_id, username, last_active)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id) DO UPDATE SET
+                last_active = CURRENT_TIMESTAMP,
+                username = COALESCE(?, username)
+        """, (user_id, username, username))
+        con.commit()
+
+def log_download(user_id: int, media_type: str, url: str, success: bool, error_message: str = None):
+    """Log download attempt to history."""
+    with sqlite3.connect(DB_FILE) as con:
+        cur = con.cursor()
+        cur.execute("""
+            INSERT INTO download_history 
+            (user_id, media_type, url, success, error_message)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_id, media_type, url, success, error_message))
+        if success:
+            cur.execute("""
+                UPDATE users SET 
+                downloads_today = downloads_today + 1,
+                total_downloads = total_downloads + 1
+                WHERE user_id = ?
+            """, (user_id,))
+        con.commit()
+
+def get_download_history(user_id: int, limit: int = 10) -> list:
+    """Get user's download history."""
+    with sqlite3.connect(DB_FILE) as con:
+        cur = con.cursor()
+        cur.execute("""
+            SELECT media_type, url, timestamp, success, error_message
+            FROM download_history
+            WHERE user_id = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, (user_id, limit))
+        return [
+            {
+                "media_type": row[0],
+                "url": row[1],
+                "timestamp": row[2],
+                "success": row[3],
+                "error_message": row[4]
+            }
+            for row in cur.fetchall()
+        ]
+
+def log_performance_metric():
+    """Log current system performance metrics."""
+    try:
+        cpu = psutil.cpu_percent(interval=1)
+        mem = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+        with sqlite3.connect(DB_FILE) as con:
+            con.execute("""
+                INSERT INTO performance_metrics 
+                (cpu_usage, memory_usage, disk_usage)
+                VALUES (?, ?, ?)
+            """, (cpu, mem.percent, disk.percent))
+            con.commit()
+    except Exception as e:
+        logger.error(f"Failed to log performance metrics: {e}")
+
+def check_user_quota(user_id: int) -> dict:
+    """Check if user has remaining quota for today."""
+    profile = get_user_profile(user_id)
+    if not profile:
+        return {"allowed": True, "remaining": DEFAULT_DAILY_QUOTA}
+    
+    # Check if quota needs reset (daily reset)
+    quota_reset = datetime.fromisoformat(profile["quota_reset_at"])
+    now = datetime.utcnow()
+    
+    if now.date() > quota_reset.date():
+        # Reset daily quota
+        with sqlite3.connect(DB_FILE) as con:
+            con.execute("""
+                UPDATE users SET 
+                downloads_today = 0,
+                quota_reset_at = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+            """, (user_id,))
+            con.commit()
+        profile["downloads_today"] = 0
+    
+    remaining = profile["daily_quota"] - profile["downloads_today"]
+    return {
+        "allowed": remaining > 0,
+        "remaining": remaining,
+        "quota": profile["daily_quota"]
+    }
+
+def get_user_settings(user_id: int) -> dict:
+    """Get user's configuration settings."""
+    profile = get_user_profile(user_id)
+    if not profile:
+        return DEFAULT_SETTINGS
+    return profile["settings"]
+
+def update_user_settings(user_id: int, settings: dict):
+    """Update user's configuration settings."""
+    current_settings = get_user_settings(user_id)
+    current_settings.update(settings)
+    
+    with sqlite3.connect(DB_FILE) as con:
+        con.execute("""
+            UPDATE users SET settings = ?
+            WHERE user_id = ?
+        """, (json.dumps(current_settings), user_id))
+        con.commit()
+
+def get_performance_stats(hours: int = 24) -> dict:
+    """Get performance statistics for the last N hours."""
+    with sqlite3.connect(DB_FILE) as con:
+        cur = con.cursor()
+        cur.execute("""
+            SELECT AVG(cpu_usage), AVG(memory_usage), AVG(disk_usage),
+                   MAX(cpu_usage), MAX(memory_usage), MAX(disk_usage),
+                   COUNT(*) as samples
+            FROM performance_metrics
+            WHERE timestamp > datetime('now', '-{} hours')
+        """.format(hours))
+        row = cur.fetchone()
+        if not row or row[6] == 0:
+            return {"error": "No performance data available"}
+        
+        return {
+            "avg_cpu": round(row[0], 2),
+            "avg_memory": round(row[1], 2),
+            "avg_disk": round(row[2], 2),
+            "max_cpu": round(row[3], 2),
+            "max_memory": round(row[4], 2),
+            "max_disk": round(row[5], 2),
+            "samples": row[6]
+        }
+
+async def process_profile_command(event):
+    """Process user profile command."""
+    user_id = event.sender_id
+    username = event.sender.username or event.sender.first_name
+    
+    # Update user activity
+    update_user_activity(user_id, username)
+    
+    profile = get_user_profile(user_id)
+    if not profile:
+        return await event.reply("❌ Profil tidak ditemukan.")
+    
+    quota_info = check_user_quota(user_id)
+    
+    profile_text = f"""
+👤 **Profil Pengguna**
+
+🆔 **User ID:** `{user_id}`
+👤 **Username:** @{profile['username'] or 'N/A'}
+📅 **Bergabung:** `{profile['first_seen'][:10]}`
+🕐 **Terakhir Aktif:** `{profile['last_active'][:16]}`
+
+📊 **Statistik Download:**
+📈 **Total:** `{profile['total_downloads']}` file
+📅 **Hari Ini:** `{profile['downloads_today']}`/`{profile['daily_quota']}`
+⏳ **Sisa Quota:** `{quota_info['remaining']}`
+
+⚙️ **Pengaturan:**
+🌐 **Bahasa:** `{profile['settings']['language'].upper()}`
+🔔 **Notifikasi:** `{'✅' if profile['settings']['notifications'] else '❌'}`
+🎨 **Kualitas:** `{profile['settings']['download_quality'].title()}`
+"""
+    
+    await event.reply(profile_text)
+
+async def process_history_command(event):
+    """Process user download history command."""
+    user_id = event.sender_id
+    history = get_download_history(user_id, 10)
+    
+    if not history:
+        return await event.reply("📝 **Riwayat Download**\n\nBelum ada riwayat download.")
+    
+    history_text = "📝 **Riwayat Download (10 Terakhir)**\n\n"
+    
+    for i, item in enumerate(history, 1):
+        status = "✅" if item["success"] else "❌"
+        media_type = item["media_type"].title()
+        timestamp = item["timestamp"][:16]
+        
+        history_text += f"{i}. {status} **{media_type}** - `{timestamp}`\n"
+        if not item["success"] and item["error_message"]:
+            history_text += f"   ⚠️ {item['error_message'][:50]}...\n"
+        history_text += "\n"
+    
+    await event.reply(history_text)
+
+async def process_quota_command(event):
+    """Process user quota check command."""
+    user_id = event.sender_id
+    quota_info = check_user_quota(user_id)
+    
+    quota_text = f"""
+📊 **Status Quota Harian**
+
+⏳ **Sisa Quota:** `{quota_info['remaining']}`/`{quota_info['quota']}`
+📈 **Persentase:** `{((quota_info['quota'] - quota_info['remaining']) / quota_info['quota'] * 100):.1f}%`
+
+{'🟢 **Status:** Quota tersedia' if quota_info['allowed'] else '🔴 **Status:** Quota habis'}
+
+💡 **Info:** Quota akan reset setiap hari pada 00:00 UTC
+"""
+    
+    await event.reply(quota_text)
+
+async def process_config_command(event):
+    """Process configuration command."""
+    user_id = event.sender_id
+    settings = get_user_settings(user_id)
+    
+    from telethon.tl.custom import Button
+    
+    config_text = f"""
+⚙️ **Konfigurasi Bot**
+
+🌐 **Bahasa:** `{settings['language'].upper()}`
+🔔 **Notifikasi:** `{'Aktif' if settings['notifications'] else 'Nonaktif'}`
+🎨 **Kualitas Download:** `{settings['download_quality'].title()}`
+
+Pilih pengaturan yang ingin diubah:
+"""
+    
+    buttons = [
+        [
+            Button.inline("🌐 Bahasa", data="config_language"),
+            Button.inline("🔔 Notifikasi", data="config_notifications")
+        ],
+        [
+            Button.inline("🎨 Kualitas", data="config_quality"),
+            Button.inline("🔄 Reset", data="config_reset")
+        ],
+        [Button.inline("❌ Tutup", data="config_close")]
+    ]
+    
+    await event.reply(config_text, buttons=buttons)
 
 def humanbytes(size):
     if not size: return ""
@@ -26,6 +417,25 @@ def humanbytes(size):
         n += 1
     return f"{size:.2f}{power_labels[n]}"
 
+def get_speed_str(bytes_amount, elapsed):
+    """Calculate and format download/upload speed."""
+    if elapsed == 0:
+        return '0 B/s'
+    speed = bytes_amount / elapsed
+    return humanbytes(speed) + '/s'
+
+def get_system_info():
+    """Get system information including CPU, RAM, and disk usage."""
+    cpu_percent = psutil.cpu_percent(interval=0.5)
+    ram = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
+    uptime = format_uptime(BOT_START_TIME)
+    return (f"--- ℹ️ System Info ---\n"
+            f"Uptime: {uptime}\n"
+            f"CPU: {cpu_percent}%\n"
+            f"RAM: {ram.percent}% ({humanbytes(ram.used)}/{humanbytes(ram.total)})\n"
+            f"Disk: {disk.percent}% ({humanbytes(disk.used)}/{humanbytes(disk.total)})")
+
 def format_uptime(start_time):
     uptime = datetime.utcnow() - start_time; days = uptime.days
     hours, rem = divmod(uptime.seconds, 3600); minutes, seconds = divmod(rem, 60); parts = []
@@ -35,25 +445,47 @@ def format_uptime(start_time):
     if seconds > 0: parts.append(f"{seconds}s")
     return " ".join(parts) if parts else "0s"
 
-def _run_zip_process(board_name, image_urls):
+def _run_zip_process(board_name, image_urls, progress_callback=None):
     temp_dir = os.path.join(DOWNLOADS_DIR, board_name); os.makedirs(temp_dir, exist_ok=True)
+    total = len(image_urls)
     with httpx.Client() as client:
         for i, url in enumerate(image_urls):
             try:
-                r = client.get(url, timeout=20.0);
+                r = client.get(url, timeout=20.0)
                 if r.status_code == 200:
                     with open(os.path.join(temp_dir, f"{i+1:04d}.jpg"), 'wb') as f: f.write(r.content)
-            except Exception as e: logger.warning(f"Gagal mengunduh {url}: {e}")
-    zip_path = os.path.join(DOWNLOADS_DIR, f"{board_name}.zip");
+                if progress_callback:
+                    progress_callback(i+1, total, 'download')
+            except Exception as e:
+                logger.warning(f"Gagal mengunduh {url}: {e}")
+    zip_path = os.path.join(DOWNLOADS_DIR, f"{board_name}.zip")
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
         for f in os.listdir(temp_dir): zf.write(os.path.join(temp_dir, f), arcname=f)
-    shutil.rmtree(temp_dir); return zip_path
-async def _download_for_album(board_name, image_urls):
+    shutil.rmtree(temp_dir)
+    return zip_path
+async def _download_for_album(board_name, image_urls, progress_callback=None):
     temp_dir = os.path.join(DOWNLOADS_DIR, board_name); os.makedirs(temp_dir, exist_ok=True)
+    downloaded_paths = []
     async with httpx.AsyncClient() as client:
-        tasks = [_fetch_and_save(client, url, os.path.join(temp_dir, f"{i+1:04d}.jpg")) for i, url in enumerate(image_urls)]
-        results = await asyncio.gather(*tasks); downloaded_paths = [path for path in results if path is not None]
+        for i, url in enumerate(image_urls):
+            path = os.path.join(temp_dir, f"{i+1:04d}.jpg")
+            try:
+                r = await client.get(url, timeout=20.0)
+                if r.status_code == 200:
+                    with open(path, 'wb') as f: f.write(r.content)
+                    downloaded_paths.append(path)
+                if progress_callback:
+                    await progress_callback(i+1, len(image_urls), 'download')
+            except Exception as e:
+                logger.warning(f"Gagal mengunduh {url} untuk album: {e}")
     return temp_dir, downloaded_paths
+async def _progress_message(event, current, total, stage, msg=None):
+    percent = int((current/total)*100) if total else 0
+    bar = '█' * (percent // 10) + '░' * (10 - percent // 10)
+    text = f"{'⬇️' if stage=='download' else '⬆️'} {stage.capitalize()} {current}/{total} [{bar}] {percent}%"
+    if msg:
+        await msg.edit(text)
+    return text
 async def _fetch_and_save(client, url, path):
     try:
         r = await client.get(url, timeout=20.0)
@@ -94,33 +526,61 @@ async def process_pinterest_board(event, url: str, mode: str):
         board_data = await get_all_pins_with_pagination(url)
         if not board_data.get("is_success"): return await event.edit(f"⚠️ {board_data.get('message')}")
         image_urls = board_data.get("image_urls"); board_name = url.strip("/").split("/")[-1]; total_images = len(image_urls)
-        await event.edit(f"✅ Ditemukan **{total_images}** pin unik.\nMulai mengunduh untuk mode **{mode.upper()}**...")
+        msg = await event.edit(f"✅ Ditemukan **{total_images}** pin unik.\nMulai mengunduh untuk mode **{mode.upper()}**...")
         original_message = await event.get_message(); reply_to_id = original_message.reply_to.reply_to_msg_id
+        # Progress callback for download
+        async def async_progress(current, total, stage):
+            await _progress_message(event, current, total, stage, msg)
+        def sync_progress(current, total, stage):
+            asyncio.run_coroutine_threadsafe(_progress_message(event, current, total, stage, msg), asyncio.get_event_loop())
         if mode == 'zip':
-            loop = asyncio.get_event_loop(); zip_file_path = await loop.run_in_executor(None, _run_zip_process, board_name, image_urls)
-            await event.client.send_file(event.chat_id, file=zip_file_path, caption=f"✅ Arsip `.zip` dari board **'{board_name}'**.", reply_to=reply_to_id)
+            loop = asyncio.get_event_loop(); zip_file_path = await loop.run_in_executor(None, _run_zip_process, board_name, image_urls, sync_progress)
+            # Upload progress
+            async def upload_progress(current, total):
+                await _progress_message(event, current, total, 'upload', msg)
+            await event.client.send_file(event.chat_id, file=zip_file_path, caption=f"✅ Arsip `.zip` dari board **'{board_name}'**.", reply_to=reply_to_id, progress_callback=upload_progress)
             os.remove(zip_file_path)
         elif mode == 'album':
-            temp_dir, downloaded_paths = await _download_for_album(board_name, image_urls)
+            temp_dir, downloaded_paths = await _download_for_album(board_name, image_urls, async_progress)
             if not downloaded_paths: return await event.edit("Gagal mengunduh gambar.")
             for i in range(0, len(downloaded_paths), 10):
                 batch = downloaded_paths[i:i+10]; caption = f"✅ Album dari board **'{board_name}'** ({i+1}-{i+len(batch)}/{total_images})" if i == 0 else ""
-                await event.client.send_file(event.chat_id, file=batch, caption=caption, reply_to=reply_to_id)
+                # Upload progress per batch
+                async def upload_progress(current, total):
+                    await _progress_message(event, current, total, 'upload', msg)
+                await event.client.send_file(event.chat_id, file=batch, caption=caption, reply_to=reply_to_id, progress_callback=upload_progress)
                 await asyncio.sleep(1)
             shutil.rmtree(temp_dir)
-        increment_stat("board"); increment_stat("photo", total_images); await event.delete()
+        increment_stat("board"); increment_stat("photo", total_images); await msg.edit("✅ Selesai!")
     except Exception as e: logger.error(f"Error di process_pinterest_board: {e}", exc_info=True); await event.edit(f"❌ Terjadi kesalahan fatal.")
 async def process_start_command(event):
     await event.respond(f"👋 **Selamat Datang, {get_display_name(event.sender)}!**\n\nSaya Pinfairy, bot pengunduh media Pinterest. Gunakan `.help` untuk melihat fitur.", buttons=[[Button.url("</> Source Code", "https://github.com/aes-co/PinfairyBot"), Button.url("👑 Owner", "https://t.me/aesneverhere")], [Button.url("📣 Channel Update", f"https://t.me/{FORCE_SUB_CHANNEL.lstrip('@')}")]])
 async def process_help_command(event):
-    await event.respond("""**Bantuan Perintah Pinfairy Bot** 🧚\n
-`.p <link>` - Mengunduh satu foto.
-`.pv <link>` - Mengunduh satu video.
-`.pboard <link_board>` - Mengunduh semua foto dari board.
-`.search <query>` - Mencari pin di Pinterest.
-`.alive` - Cek status dan info sistem bot.
-`.stats` - Melihat statistik bot.
-`.help` - Menampilkan pesan ini.""", buttons=Button.inline("🗑️ Tutup", data=f"close_help:0"))
+    help_text = """**🧚 Bantuan Perintah Pinfairy Bot**
+
+**📥 Download Commands:**
+`.p <link>` - Download foto Pinterest
+`.pv <link>` - Download video Pinterest  
+`.pboard <link>` - Download semua foto dari board
+`.search <query>` - Cari dan download pin
+
+**👤 User Commands:**
+`.profile` - Lihat profil dan statistik
+`.history` - Riwayat download
+`.quota` - Cek sisa quota harian
+`.config` - Pengaturan bot
+
+**ℹ️ Info Commands:**
+`.alive` - Status bot dan sistem
+`.stats` - Statistik global bot
+`.help` - Bantuan ini
+
+**💡 Tips:**
+• Quota harian: 100 download/hari
+• Gunakan tanpa parameter untuk melihat cara penggunaan
+• Konfigurasi bahasa, notifikasi, dan kualitas di `.config`"""
+    
+    await event.respond(help_text, buttons=Button.inline("🗑️ Tutup", data=f"close_help:0"))
 async def process_stats_command(event):
     stats = get_stats(); await event.respond(f"📊 **Statistik Bot**\n\n🖼️ Foto: **{stats.get('photo', 0)}**\n🎬 Video: **{stats.get('video', 0)}**\n🗂️ Board: **{stats.get('board', 0)}**")
 async def _send_media_with_buttons(event, data, media_type):
@@ -137,42 +597,144 @@ async def process_pinterest_video(event, url: str):
     await msg.delete(); await _send_media_with_buttons(event, data, "video")
 async def process_pboard_callback(event):
     try:
-        mode = event.data.decode().split('_')[1]; button_message = await event.get_message(); original_cmd_msg = await button_message.get_reply_message()
-        if not original_cmd_msg or not original_cmd_msg.text: return await event.answer("Gagal membaca perintah asli.", alert=True)
-        url_match = URL_PATTERN.search(original_cmd_msg.text)
-        if not url_match: return await event.answer("Tidak dapat menemukan URL di perintah asli.", alert=True)
-        url = url_match.group(0); await process_pinterest_board(event, url, mode=mode)
-    except Exception as e: logger.error(f"Error di process_pboard_callback: {e}", exc_info=True); await event.edit("❌ **Error!** Terjadi kesalahan.")
+        mode = event.data.decode().split('_')[1]
+        button_message = await event.get_message()
+        original_cmd_msg = await button_message.get_reply_message()
+        if not original_cmd_msg or not original_cmd_msg.text:
+            return await event.answer("Gagal membaca perintah asli.", alert=True)
+        import re
+        link_list = re.findall(r'https?://.*?(?=https?://|$)', original_cmd_msg.text)
+        if not link_list:
+            return await event.answer("Tidak ada link board valid ditemukan.", alert=True)
+        user = await event.client.get_entity(event.sender_id)
+        username = get_display_name(user)
+        all_files = []
+        all_captions = []
+        temp_dirs_to_remove = []
+        for idx, url in enumerate(link_list, 1):
+            board_data = await get_all_pins_with_pagination(url)
+            if not board_data.get("is_success"):
+                all_captions.append(f"❌ Board {idx}: {board_data.get('message')}")
+                continue
+            image_urls = board_data.get("image_urls")
+            board_name = url.strip("/").split("/")[-1]
+            # Progress message
+            msg = await event.edit(f"⬇️ Downloading board {idx}/{len(link_list)}: {board_name}.zip\nUser: {username}\n0% [░░░░░░░░░░] 0/0\nSpeed: 0 B/s | Elapsed: 0s", buttons=[Button.inline("ℹ️ More Info", data=f"sysinfo:{idx}")])
+            start_time = time.time()
+            bytes_downloaded = 0
+            # Custom progress callback
+            def zip_progress(current, total, stage):
+                elapsed = time.time() - start_time
+                percent = int((current/total)*100) if total else 0
+                bar = '█' * (percent // 10) + '░' * (10 - percent // 10)
+                speed = get_speed_str(current, elapsed)
+                text = (f"⬇️ Downloading board {idx}/{len(link_list)}: {board_name}.zip\n"
+                        f"User: {username}\n"
+                        f"{percent}% [{bar}] {current}/{total}\n"
+                        f"Speed: {speed} | Elapsed: {int(elapsed*1000)} ms")
+                asyncio.run_coroutine_threadsafe(msg.edit(text, buttons=[Button.inline("ℹ️ More Info", data=f"sysinfo:{idx}")]), asyncio.get_event_loop())
+            if mode == 'zip':
+                loop = asyncio.get_event_loop()
+                zip_file_path = await loop.run_in_executor(None, _run_zip_process, f"{board_name}_{idx}", image_urls, zip_progress)
+                all_files.append(zip_file_path)
+                all_captions.append(f"✅ Board {idx}: ZIP siap!")
+                # Upload progress
+                async def upload_progress(current, total):
+                    elapsed = time.time() - start_time
+                    percent = int((current/total)*100) if total else 0
+                    bar = '█' * (percent // 10) + '░' * (10 - percent // 10)
+                    speed = get_speed_str(current, elapsed)
+                    text = (f"⬆️ Uploading: {os.path.basename(zip_file_path)}\nUser: {username}\n"
+                            f"{percent}% [{bar}] {current}/{total}\n"
+                            f"Speed: {speed} | Elapsed: {int(elapsed*1000)} ms")
+                    await msg.edit(text, buttons=[Button.inline("ℹ️ More Info", data=f"sysinfo:{idx}")])
+                await event.client.send_file(event.chat_id, file=zip_file_path, caption=f"ZIP Board {idx}", reply_to=original_cmd_msg.id, progress_callback=upload_progress)
+                os.remove(zip_file_path)
+            else:
+                async def album_progress(current, total, stage):
+                    elapsed = time.time() - start_time
+                    percent = int((current/total)*100) if total else 0
+                    bar = '█' * (percent // 10) + '░' * (10 - percent // 10)
+                    speed = get_speed_str(current, elapsed)
+                    text = (f"⬇️ Downloading board {idx}/{len(link_list)}: {board_name}\nUser: {username}\n"
+                            f"{percent}% [{bar}] {current}/{total}\n"
+                            f"Speed: {speed} | Elapsed: {int(elapsed*1000)} ms")
+                    await msg.edit(text, buttons=[Button.inline("ℹ️ More Info", data=f"sysinfo:{idx}")])
+                temp_dir, downloaded_paths = await _download_for_album(f"{board_name}_{idx}", image_urls, album_progress)
+                if downloaded_paths:
+                    for i, file_path in enumerate(downloaded_paths, 1):
+                        async def upload_progress(current, total, file_path=file_path):
+                            elapsed = time.time() - start_time
+                            percent = int((current/total)*100) if total else 0
+                            bar = '█' * (percent // 10) + '░' * (10 - percent // 10)
+                            speed = get_speed_str(current, elapsed)
+                            text = (f"⬆️ Uploading: {os.path.basename(file_path)}\nUser: {username}\n"
+                                    f"{percent}% [{bar}] {current}/{total}\n"
+                                    f"Speed: {speed} | Elapsed: {int(elapsed*1000)} ms")
+                            await msg.edit(text, buttons=[Button.inline("ℹ️ More Info", data=f"sysinfo:{idx}")])
+                        await event.client.send_file(event.chat_id, file=file_path, caption=f"Board {idx}: {os.path.basename(file_path)}", reply_to=original_cmd_msg.id, progress_callback=upload_progress)
+                    all_files.extend(downloaded_paths)
+                    all_captions.append(f"✅ Board {idx}: {len(downloaded_paths)} file siap!")
+                temp_dirs_to_remove.append(temp_dir)
+        if not all_files:
+            return await event.edit("Tidak ada file yang berhasil diunduh dari link board yang diberikan.\n" + "\n".join(all_captions))
+        # Hapus semua temp_dir setelah pengiriman selesai
+        for temp_dir in temp_dirs_to_remove:
+            shutil.rmtree(temp_dir)
+        await event.edit("\n".join(all_captions))
+    except Exception as e:
+        logger.error(f"Error di process_pboard_callback: {e}", exc_info=True)
+        await event.edit("❌ **Error!** Terjadi kesalahan.")
 async def process_main_callback(event):
-    callback_data = event.data.decode("utf-8");
-    try: action, target_id_str = callback_data.split(":", 1); target_id = int(target_id_str)
-    except ValueError: action, target_id = callback_data, None
-    if action == "close_help": return await event.delete()
-    if not target_id: return await event.answer()
+    callback_data = event.data.decode("utf-8")
+    if callback_data.startswith("sysinfo:"):
+        # Show system info
+        await event.answer(get_system_info(), alert=True)
+        return
+    try:
+        action, target_id_str = callback_data.split(":", 1)
+        target_id = int(target_id_str)
+    except ValueError:
+        action, target_id = callback_data, None
+    if action == "close_help":
+        return await event.delete()
+    if not target_id:
+        return await event.answer()
     if action == "info_msg":
         try:
             msg = await event.client.get_messages(event.chat_id, ids=target_id)
-            if not msg or not msg.media: return await event.answer("Media tidak ditemukan.", alert=True)
+            if not msg or not msg.media:
+                return await event.answer("Media tidak ditemukan.", alert=True)
             file_size = 0; dimensions = "N/A"
             if msg.photo:
-                photo_size_info = max(msg.photo.sizes, key=lambda s: s.size); file_size = photo_size_info.size; dimensions = f"{photo_size_info.w} x {photo_size_info.h}"
+                photo_size_info = max(msg.photo.sizes, key=lambda s: s.size)
+                file_size = photo_size_info.size
+                dimensions = f"{photo_size_info.w} x {photo_size_info.h}"
             elif msg.document:
                 file_size = msg.document.size
                 for attr in msg.document.attributes:
-                    if hasattr(attr, 'w') and hasattr(attr, 'h'): dimensions = f"{attr.w} x {attr.h}"; break
+                    if hasattr(attr, 'w') and hasattr(attr, 'h'):
+                        dimensions = f"{attr.w} x {attr.h}"
+                        break
             info_text = (f"--- ℹ️ Info Media ---\n"
                          f"Ukuran File: {humanbytes(file_size)}\n"
-                         f"Dimensi: {dimensions}"); return await event.answer(info_text, alert=True)
-        except Exception as e: logger.error(f"Gagal menampilkan info: {e}"); return await event.answer("Gagal mendapatkan info media.", alert=True)
+                         f"Dimensi: {dimensions}")
+            return await event.answer(info_text, alert=True)
+        except Exception as e:
+            logger.error(f"Gagal menampilkan info: {e}")
+            return await event.answer("Gagal mendapatkan info media.", alert=True)
     elif action == "delete_confirmation":
         await event.edit("Anda yakin?", buttons=[Button.inline("✅ Ya", data=f"delete_execute:{target_id}"), Button.inline("❌ Batal", data=f"delete_cancel:{target_id}")])
-    elif action == "delete_execute": await event.client.delete_messages(event.chat_id, target_id); await event.delete()
+    elif action == "delete_execute":
+        await event.client.delete_messages(event.chat_id, target_id)
+        await event.delete()
     elif action == "delete_cancel":
         try:
             msg = await event.client.get_messages(event.chat_id, ids=target_id)
             original_buttons = [[Button.url("🔗 Lihat Post Asli", msg.buttons[0][0].url)], [Button.inline("ℹ️ Info", data=f"info_msg:{target_id}"), Button.inline("🗑️ Hapus", data=f"delete_confirmation:{target_id}")]]
             await event.edit(buttons=original_buttons)
-        except Exception: await event.answer("Gagal membatalkan.")
+        except Exception:
+            await event.answer("Gagal membatalkan.")
 async def clean_temp_files(folder=DOWNLOADS_DIR, max_age_hours=1):
     if not os.path.isdir(folder): os.makedirs(folder, exist_ok=True); return
     now = time.time(); max_age_seconds = max_age_hours * 3600
