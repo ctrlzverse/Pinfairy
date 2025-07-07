@@ -1,4 +1,4 @@
-import os, sys, logging, asyncio
+import os, sys, logging, asyncio, re
 from telethon import TelegramClient, events
 from dotenv import load_dotenv
 
@@ -15,10 +15,14 @@ try:
         handle_profile,
         handle_history,
         handle_quota,
-        handle_config
+        handle_config,
+        handle_leaderboard,
+        handle_feedback,
+        handle_backup,
+        handle_restore
     )
     from handlers.callbacks import handle_button_press
-    from core import clean_temp_files, init_db, log_performance_metric
+    from core import clean_temp_files, init_db, log_performance_metric, validate_pinterest_url
 except ImportError as e:
     print(f"❌ Gagal mengimpor handler: {e}"); sys.exit(1)
 
@@ -31,8 +35,7 @@ API_ID = int(API_ID)
 client = TelegramClient('bot_session', API_ID, API_HASH)
 
 async def main():
-    """Menyatukan semua logika startup dan menjalankan bot."""
-    
+    """Menyatukan semua logika startup dan menjalankan bot."""    
     await client.start(bot_token=BOT_TOKEN)
     logger.info("Bot berhasil terhubung.")
     
@@ -57,31 +60,69 @@ async def main():
     client.add_event_handler(handle_history, events.NewMessage(pattern=r'^\.history$'))
     client.add_event_handler(handle_quota, events.NewMessage(pattern=r'^\.quota$'))
     client.add_event_handler(handle_config, events.NewMessage(pattern=r'^\.config$'))
+    client.add_event_handler(handle_leaderboard, events.NewMessage(pattern=r'^\.leaderboard$'))
+    client.add_event_handler(handle_feedback, events.NewMessage(pattern=r'^\.feedback$'))
+    client.add_event_handler(handle_backup, events.NewMessage(pattern=r'^\.backup$'))
+    client.add_event_handler(handle_restore, events.NewMessage(pattern=r'^\.restore$'))
     
     logger.info("✅ Semua handler berhasil didaftarkan.")
+
+    # Auto-detect Pinterest link in any message
+    @client.on(events.NewMessage(incoming=True))
+    async def auto_detect_link(event):
+        if not event.text or event.text.startswith('.') or event.text.startswith('/'):
+            return
+
+        match = re.search(r'(https?://(www\.)?(id\.)?pinterest\.com/[^\s]+|https?://pin\.it/[^\s]+)', event.text)
+        if match:
+            url = match.group(0).strip()
+            from telethon.tl.custom import Button
+
+            validation = validate_pinterest_url(url)
+            if not validation["is_valid"]:
+                if validation.get("is_dead"):
+                    await event.reply(
+                        f"⚠️ Link terdeteksi, tapi sepertinya sudah mati atau tidak valid.\n\n`{url}`",
+                        buttons=[[Button.inline("🗑️ Tutup", data="close_help")]]
+                    )
+                return
+
+            buttons = []
+            if "/pin/" in url:
+                buttons.append([Button.inline("📷 Download Foto", data=f"auto_photo:{url}")])
+                buttons.append([Button.inline("🎬 Download Video", data=f"auto_video:{url}")])
+            else:
+                buttons.append([Button.inline("🗂️ Download Board", data=f"auto_board:{url}")])
+
+            if not buttons:
+                return
+
+            buttons.append([Button.inline("🗑️ Tutup", data="close_help")])
+
+            await event.reply(
+                f"🔗 Link Pinterest terdeteksi!\n\nPilih aksi untuk:\n`{url}`",
+                buttons=buttons
+            )
     
     # Schedule background tasks
     async def scheduled_cleanup():
-        """Scheduled task for cleaning temporary files."""
         while True:
             try:
                 await clean_temp_files()
-                await asyncio.sleep(3600)  # Every hour
+                await asyncio.sleep(3600)
             except Exception as e:
                 logger.error(f"Error in cleanup task: {e}")
-                await asyncio.sleep(300)  # Wait 5 minutes on error
+                await asyncio.sleep(300)
 
     async def performance_monitor():
-        """Scheduled task for monitoring system performance."""
         while True:
             try:
                 log_performance_metric()
-                await asyncio.sleep(300)  # Every 5 minutes
+                await asyncio.sleep(300)
             except Exception as e:
                 logger.error(f"Error in performance monitor: {e}")
-                await asyncio.sleep(60)  # Wait 1 minute on error
+                await asyncio.sleep(60)
 
-    # Start background tasks
     asyncio.create_task(scheduled_cleanup())
     asyncio.create_task(performance_monitor())
     

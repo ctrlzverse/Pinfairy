@@ -20,6 +20,7 @@ def _extract_image_url(pin_data: dict) -> str | None:
     return None
 
 async def get_all_pins_with_pagination(board_url: str) -> dict:
+    board_url = board_url.strip().rstrip("`")
     logger.info(f"[Pinterest] Mulai scraping board: {board_url}")
     all_image_urls = {}  # Dictionary untuk menyimpan URL dengan resolusi tertinggi
     PINTEREST_API_ENDPOINT = "https://www.pinterest.com/resource/BoardFeedResource/get/"
@@ -81,11 +82,16 @@ async def get_all_pins_with_pagination(board_url: str) -> dict:
                 try:
                     from playwright.async_api import async_playwright
                     async with async_playwright() as p:
-                        browser = await p.chromium.launch()
+                        browser = await p.chromium.launch(executable_path="/usr/bin/google-chrome-stable")
                         page = await browser.new_page()
-                        await page.goto(board_url, timeout=60000)
-                        await page.wait_for_selector('[data-test-id="pin-visual-wrapper"]', timeout=30000)
-                        await page.evaluate("window.scrollBy(0, 2000)"); await asyncio.sleep(2)
+                        await page.goto(board_url, wait_until="domcontentloaded", timeout=60000)
+                        
+                        # Scroll down multiple times to load all pins
+                        for _ in range(5):
+                            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                            await page.wait_for_timeout(2000) # Wait for content to load
+                        
+                        await page.wait_for_load_state("networkidle", timeout=30000)
                         html_content = await page.content()
                         await browser.close()
                     

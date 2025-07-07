@@ -1,5 +1,5 @@
 import logging
-from core import process_pboard_callback, process_main_callback, update_user_settings
+from core import process_pboard_callback, process_main_callback, update_user_settings, process_auto_download, process_start_callback, process_leaderboard_callback, process_feedback_callback, process_admin_callback
 
 logger = logging.getLogger(__name__)
 
@@ -12,10 +12,20 @@ async def handle_button_press(event):
     logger.info(f"Callback diterima dari user {event.sender_id} dengan data: {button_data}")
 
     # Router logic
-    if button_data.startswith("pboard_"):
+    if button_data.startswith("auto_"):
+        await process_auto_download(event)
+    elif button_data.startswith("pboard_"):
         await process_pboard_callback(event)
     elif button_data.startswith("config_"):
         await handle_config_callback(event)
+    elif button_data in ["refresh_leaderboard", "my_stats"]:
+        await process_leaderboard_callback(event)
+    elif button_data in ["feedback_input", "feature_request_input"]:
+        await process_feedback_callback(event)
+    elif button_data in ["do_backup", "do_restore"]:
+        await process_admin_callback(event)
+    elif button_data in ["quick_guide", "full_help", "back_to_start"]:
+        await process_start_callback(event)
     else:
         await process_main_callback(event)
 

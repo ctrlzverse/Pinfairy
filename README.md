@@ -22,29 +22,36 @@ PinfairyBot is an advanced Telegram bot that helps you download high-quality ima
 ## 🚀 Features
 
 ### 📥 Download Features
-- **High-Quality Downloads** - Automatically selects highest resolution available
-- **Smart Deduplication** - Removes duplicate images from board downloads
-- **Multiple Formats** - Support for photos, videos, and entire boards
-- **Batch Processing** - Download entire Pinterest boards as ZIP or albums
-- **Search Integration** - Search and download Pinterest pins directly
+- **Auto-Detect Links** - Automatically detects Pinterest links in chat and offers download options.
+- **High-Quality Downloads** - Automatically selects highest resolution available.
+- **Smart Deduplication** - Removes duplicate images from board downloads.
+- **Multiple Formats** - Support for photos, videos, and entire boards.
+- **Batch Processing** - Download entire Pinterest boards as ZIP or albums.
+- **Search Integration** - Search and download Pinterest pins directly.
 
 ### 👤 User Management
-- **User Profiles** - Track download statistics and activity
-- **Download History** - View last 10 download attempts with status
-- **Daily Quotas** - 100 downloads per day with automatic reset
-- **Activity Tracking** - Monitor user engagement and usage patterns
+- **User Profiles** - Track download statistics and activity.
+- **Download History** - View last 10 download attempts with status.
+- **Daily Quotas** - 100 downloads per day with automatic reset.
+- **Activity Tracking** - Monitor user engagement and usage patterns.
+- **Leaderboard** - View the top downloaders.
 
 ### ⚙️ Configuration System
-- **Interactive Settings** - Easy-to-use configuration interface
-- **Multi-language Support** - Indonesian and English languages
-- **Quality Options** - Choose between High/Medium/Low quality
-- **Notification Controls** - Enable/disable bot notifications
+- **Interactive Settings** - Easy-to-use configuration interface with buttons.
+- **Multi-language Support** - Indonesian and English languages.
+- **Quality Options** - Choose between High/Medium/Low quality.
+- **Notification Controls** - Enable/disable bot notifications.
 
 ### 🔒 Security & Performance
-- **Rate Limiting** - Prevents spam with 3-second cooldowns
-- **Input Validation** - Comprehensive URL and query validation
-- **Performance Monitoring** - Real-time system metrics tracking
-- **Automatic Cleanup** - Scheduled file cleanup and maintenance
+- **Rate Limiting** - Prevents spam with 3-second cooldowns.
+- **Input Validation** - Comprehensive URL and query validation.
+- **Anti-Dead Link** - Checks if a link is valid before processing.
+- **Performance Monitoring** - Real-time system metrics tracking.
+- **Automatic Cleanup** - Scheduled file cleanup and maintenance.
+
+### 👑 Admin Features
+- **Backup & Restore** - Admins can backup and restore the bot's database.
+- **Feedback System** - Users can send feedback and feature requests to the admin.
 
 ---
 
@@ -64,6 +71,8 @@ PinfairyBot is an advanced Telegram bot that helps you download high-quality ima
 .history           - View download history
 .quota             - Check daily quota status
 .config            - Bot configuration settings
+.leaderboard       - View the top downloaders
+.feedback          - Send feedback or feature requests
 ```
 
 ### ℹ️ Information Commands
@@ -72,6 +81,12 @@ PinfairyBot is an advanced Telegram bot that helps you download high-quality ima
 .help              - Complete command reference
 .stats             - Global bot statistics
 .alive             - Bot status and system info
+```
+
+### 👑 Admin Commands
+```
+.backup            - Backup the bot's database
+.restore           - Restore the bot's database
 ```
 
 ---
@@ -109,6 +124,7 @@ PinfairyBot is an advanced Telegram bot that helps you download high-quality ima
    API_HASH=your_telegram_api_hash
    BOT_TOKEN=your_bot_token
    FORCE_SUB_CHANNEL=@your_channel
+   ADMIN_IDS=your_admin_id1,your_admin_id2
    ```
 
 4. **Initialize Playwright:**

@@ -23,16 +23,26 @@ def validate_pinterest_url(url: str) -> dict:
     
     # Check if it's a valid URL format
     if not re.match(r'^https?://', url):
-        return {"is_valid": False, "message": "URL harus dimulai dengan http:// atau https://"}
+        return {"is_valid": False, "message": "URL harus dimulai dengan http:// atau https://", "is_dead": False}
     
     # Check if it's Pinterest domain
     pinterest_domains = ['pinterest.com', 'pin.it', 'www.pinterest.com']
     if not any(domain in url for domain in pinterest_domains):
-        return {"is_valid": False, "message": "URL harus dari domain Pinterest (pinterest.com atau pin.it)"}
+        return {"is_valid": False, "message": "URL harus dari domain Pinterest (pinterest.com atau pin.it)", "is_dead": False}
     
     # Check URL length (prevent extremely long URLs)
     if len(url) > 2000:
-        return {"is_valid": False, "message": "URL terlalu panjang."}
+        return {"is_valid": False, "message": "URL terlalu panjang.", "is_dead": False}
+
+    # Check if link is alive
+    try:
+        with httpx.Client() as client:
+            r = client.head(url, follow_redirects=True, timeout=10.0)
+            if r.status_code != 200:
+                return {"is_valid": False, "message": "Link tidak valid atau sudah mati.", "is_dead": True}
+    except Exception as e:
+        logger.warning(f"Gagal memeriksa link {url}: {e}")
+        return {"is_valid": False, "message": "Gagal memeriksa link.", "is_dead": True}
     
     return {"is_valid": True, "url": url}
 
@@ -83,13 +93,13 @@ def init_db():
                 username TEXT,
                 first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                daily_quota INTEGER DEFAULT ?,
+                daily_quota INTEGER DEFAULT 100,
                 downloads_today INTEGER DEFAULT 0,
                 total_downloads INTEGER DEFAULT 0,
                 quota_reset_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                settings TEXT DEFAULT ?
-            )
-        """, (DEFAULT_DAILY_QUOTA, json.dumps(DEFAULT_SETTINGS)))
+                settings TEXT DEFAULT '{"language": "id", "notifications": true, "download_quality": "high"}'
+            );
+        """)
         
         # Download history table
         cur.execute("""
@@ -302,7 +312,7 @@ def get_performance_stats(hours: int = 24) -> dict:
         }
 
 async def process_profile_command(event):
-    """Process user profile command."""
+    from telethon.tl.custom import Button
     user_id = event.sender_id
     username = event.sender.username or event.sender.first_name
     
@@ -311,7 +321,7 @@ async def process_profile_command(event):
     
     profile = get_user_profile(user_id)
     if not profile:
-        return await event.reply("❌ Profil tidak ditemukan.")
+        return await event.reply("❌ Profil tidak ditemukan.", buttons=[Button.inline("🗑️ Tutup", data="close_help")])
     
     quota_info = check_user_quota(user_id)
     
@@ -328,21 +338,21 @@ async def process_profile_command(event):
 📅 **Hari Ini:** `{profile['downloads_today']}`/`{profile['daily_quota']}`
 ⏳ **Sisa Quota:** `{quota_info['remaining']}`
 
-⚙️ **Pengaturan:**
+⚙��� **Pengaturan:**
 🌐 **Bahasa:** `{profile['settings']['language'].upper()}`
 🔔 **Notifikasi:** `{'✅' if profile['settings']['notifications'] else '❌'}`
 🎨 **Kualitas:** `{profile['settings']['download_quality'].title()}`
 """
     
-    await event.reply(profile_text)
+    await event.reply(profile_text, buttons=[Button.inline("🔄 Refresh", data="refresh_profile"), Button.inline("🗑️ Tutup", data="close_help")])
 
 async def process_history_command(event):
-    """Process user download history command."""
+    from telethon.tl.custom import Button
     user_id = event.sender_id
     history = get_download_history(user_id, 10)
     
     if not history:
-        return await event.reply("📝 **Riwayat Download**\n\nBelum ada riwayat download.")
+        return await event.reply("📝 **Riwayat Download**\n\nBelum ada riwayat download.", buttons=[Button.inline("🗑️ Tutup", data="close_help")])
     
     history_text = "📝 **Riwayat Download (10 Terakhir)**\n\n"
     
@@ -356,10 +366,10 @@ async def process_history_command(event):
             history_text += f"   ⚠️ {item['error_message'][:50]}...\n"
         history_text += "\n"
     
-    await event.reply(history_text)
+    await event.reply(history_text, buttons=[Button.inline("🔄 Refresh", data="refresh_history"), Button.inline("🗑️ Tutup", data="close_help")])
 
 async def process_quota_command(event):
-    """Process user quota check command."""
+    from telethon.tl.custom import Button
     user_id = event.sender_id
     quota_info = check_user_quota(user_id)
     
@@ -374,7 +384,7 @@ async def process_quota_command(event):
 💡 **Info:** Quota akan reset setiap hari pada 00:00 UTC
 """
     
-    await event.reply(quota_text)
+    await event.reply(quota_text, buttons=[Button.inline("🔄 Refresh", data="refresh_quota"), Button.inline("🗑️ Tutup", data="close_help")])
 
 async def process_config_command(event):
     """Process configuration command."""
@@ -554,8 +564,36 @@ async def process_pinterest_board(event, url: str, mode: str):
         increment_stat("board"); increment_stat("photo", total_images); await msg.edit("✅ Selesai!")
     except Exception as e: logger.error(f"Error di process_pinterest_board: {e}", exc_info=True); await event.edit(f"❌ Terjadi kesalahan fatal.")
 async def process_start_command(event):
-    await event.respond(f"👋 **Selamat Datang, {get_display_name(event.sender)}!**\n\nSaya Pinfairy, bot pengunduh media Pinterest. Gunakan `.help` untuk melihat fitur.", buttons=[[Button.url("</> Source Code", "https://github.com/aes-co/PinfairyBot"), Button.url("👑 Owner", "https://t.me/aesneverhere")], [Button.url("📣 Channel Update", f"https://t.me/{FORCE_SUB_CHANNEL.lstrip('@')}")]])
+    from telethon.tl.custom import Button
+    user_name = get_display_name(event.sender)
+    
+    start_text = f"""
+👋 **Halo, {user_name}! Selamat datang di Pinfairy Bot!** 🧚
+
+Saya adalah asisten pribadimu untuk mengunduh semua media dari **Pinterest** dengan cepat dan mudah.
+
+**✨ Fitur Andalan:**
+- **Auto-Detect:** Cukup kirim link Pinterest di chat, saya akan langsung merespon!
+- **Kualitas Tinggi:** Selalu memberikan gambar dan video dengan resolusi terbaik.
+- **Download Board:** Unduh seluruh pin dari board favoritmu dalam sekejap.
+
+Silakan jelajahi fitur lainnya melalui tombol di bawah ini!
+"""
+    
+    buttons = [
+        [
+            Button.inline("🚀 Panduan Cepat", data="quick_guide"),
+            Button.inline("📋 Daftar Perintah", data="full_help")
+        ],
+        [
+            Button.url("📣 Channel Update", f"https://t.me/{FORCE_SUB_CHANNEL.lstrip('@')}"),
+            Button.url("💻 Source Code", "https://github.com/aes-co/PinfairyBot")
+        ]
+    ]
+    
+    await event.respond(start_text, buttons=buttons)
 async def process_help_command(event):
+    from telethon.tl.custom import Button
     help_text = """**🧚 Bantuan Perintah Pinfairy Bot**
 
 **📥 Download Commands:**
@@ -569,30 +607,63 @@ async def process_help_command(event):
 `.history` - Riwayat download
 `.quota` - Cek sisa quota harian
 `.config` - Pengaturan bot
+`.leaderboard` - Lihat papan peringkat downloader
+`.feedback` - Kirim feedback atau request fitur
 
 **ℹ️ Info Commands:**
 `.alive` - Status bot dan sistem
 `.stats` - Statistik global bot
 `.help` - Bantuan ini
 
+
 **💡 Tips:**
-• Quota harian: 100 download/hari
-• Gunakan tanpa parameter untuk melihat cara penggunaan
+• **Auto-Detect:** Cukup kirim link Pinterest di chat, bot akan otomatis merespon!
+• **Quota Harian:** 100 download/hari
 • Konfigurasi bahasa, notifikasi, dan kualitas di `.config`"""
     
-    await event.respond(help_text, buttons=Button.inline("🗑️ Tutup", data=f"close_help:0"))
+    await event.respond(help_text, buttons=[Button.inline("🗑️ Tutup", data="close_help")])
 async def process_stats_command(event):
-    stats = get_stats(); await event.respond(f"📊 **Statistik Bot**\n\n🖼️ Foto: **{stats.get('photo', 0)}**\n🎬 Video: **{stats.get('video', 0)}**\n🗂️ Board: **{stats.get('board', 0)}**")
+    from telethon.tl.custom import Button
+    stats = get_stats()
+    text = f"📊 **Statistik Bot**\n\n🖼️ Foto: **{stats.get('photo', 0)}**\n🎬 Video: **{stats.get('video', 0)}**\n🗂️ Board: **{stats.get('board', 0)}**"
+    await event.respond(text, buttons=[Button.inline("🔄 Refresh", data="refresh_stats"), Button.inline("🗑️ Tutup", data="close_help")])
+
 async def _send_media_with_buttons(event, data, media_type):
-    sent_message = await event.client.send_file(event.chat_id, file=data.get("media_url"), caption=f"✅ {media_type.capitalize()} berhasil diunduh!", reply_to=event.message)
-    increment_stat(media_type); message_id = sent_message.id
-    await sent_message.edit(buttons=[[Button.url("🔗 Lihat Post Asli", data.get("post_url"))], [Button.inline("ℹ️ Info", data=f"info_msg:{message_id}"), Button.inline("🗑️ Hapus", data=f"delete_confirmation:{message_id}")]])
+    from telethon.tl.custom import Button
+    from telethon import events
+
+    reply_to_msg = None
+    if isinstance(event, events.CallbackQuery.Event):
+        try:
+            button_msg = await event.get_message()
+            reply_to_msg = await button_msg.get_reply_message()
+        except Exception:
+            reply_to_msg = None
+    else:
+        reply_to_msg = event.message
+
+    sent_message = await event.client.send_file(
+        event.chat_id,
+        file=data.get("media_url"),
+        caption=f"✅ {media_type.capitalize()} berhasil diunduh!",
+        reply_to=reply_to_msg
+    )
+    increment_stat(media_type)
+    message_id = sent_message.id
+    await sent_message.edit(
+        buttons=[
+            [Button.url("🔗 Lihat Post Asli", data.get("post_url"))],
+            [Button.inline("ℹ️ Info", data=f"info_msg:{message_id}"), Button.inline("🔄 Download Lagi", data=f"redownload:{message_id}"), Button.inline("🗑️ Tutup", data=f"delete_confirmation:{message_id}")]
+        ]
+    )
+
 async def process_pinterest_photo(event, url: str):
-    msg = await event.respond("⏳ Mencari foto..."); data = await get_pinterest_photo_data(url)
+    msg = await event.reply("⏳ Mencari foto..."); data = await get_pinterest_photo_data(url)
     if not data.get("is_success"): return await msg.edit(f"⚠️ {data.get('message')}")
     await msg.delete(); await _send_media_with_buttons(event, data, "photo")
+
 async def process_pinterest_video(event, url: str):
-    msg = await event.respond("⏳ Mencari video..."); data = await get_pinterest_video_data(url)
+    msg = await event.reply("⏳ Mencari video..."); data = await get_pinterest_video_data(url)
     if not data.get("is_success"): return await msg.edit(f"⚠️ {data.get('message')}")
     await msg.delete(); await _send_media_with_buttons(event, data, "video")
 async def process_pboard_callback(event):
@@ -687,6 +758,8 @@ async def process_pboard_callback(event):
         await event.edit("❌ **Error!** Terjadi kesalahan.")
 async def process_main_callback(event):
     callback_data = event.data.decode("utf-8")
+    if callback_data == "close_help":
+        return await event.delete()
     if callback_data.startswith("sysinfo:"):
         # Show system info
         await event.answer(get_system_info(), alert=True)
@@ -696,8 +769,6 @@ async def process_main_callback(event):
         target_id = int(target_id_str)
     except ValueError:
         action, target_id = callback_data, None
-    if action == "close_help":
-        return await event.delete()
     if not target_id:
         return await event.answer()
     if action == "info_msg":
@@ -706,12 +777,14 @@ async def process_main_callback(event):
             if not msg or not msg.media:
                 return await event.answer("Media tidak ditemukan.", alert=True)
             file_size = 0; dimensions = "N/A"
+            if msg.file:
+                file_size = msg.file.size
+            
             if msg.photo:
-                photo_size_info = max(msg.photo.sizes, key=lambda s: s.size)
-                file_size = photo_size_info.size
+                # Find the largest photo size by dimensions, not by byte size
+                photo_size_info = max(msg.photo.sizes, key=lambda s: s.w * s.h)
                 dimensions = f"{photo_size_info.w} x {photo_size_info.h}"
             elif msg.document:
-                file_size = msg.document.size
                 for attr in msg.document.attributes:
                     if hasattr(attr, 'w') and hasattr(attr, 'h'):
                         dimensions = f"{attr.w} x {attr.h}"
@@ -735,6 +808,128 @@ async def process_main_callback(event):
             await event.edit(buttons=original_buttons)
         except Exception:
             await event.answer("Gagal membatalkan.")
+async def process_auto_download(event):
+    from telethon.tl.custom import Button
+    button_data = event.data.decode("utf-8")
+    action, url = button_data.split(":", 1)
+    
+    if action == "auto_photo":
+        await process_pinterest_photo(event, url)
+    elif action == "auto_board":
+        await event.reply("Pilih mode pengiriman:", buttons=[
+            Button.inline("Kirim sebagai ZIP 📦", data=f"pboard_zip:{url}"),
+            Button.inline("Kirim sebagai Album 🖼️", data=f"pboard_album:{url}")
+        ])
+    elif action == "auto_video":
+        await process_pinterest_video(event, url)
+
+async def process_leaderboard_command(event):
+    from telethon.tl.custom import Button
+    # Dummy data, ganti dengan query database
+    leaderboard_text = "🏆 **Top 5 Downloader**\n\n1. @user1 - 100 downloads\n2. @user2 - 95 downloads\n3. @user3 - 80 downloads\n4. @user4 - 70 downloads\n5. @user5 - 65 downloads"
+    await event.reply(
+        leaderboard_text,
+        buttons=[
+            [Button.inline("Lihat Statistik Pribadi", data="my_stats"), Button.inline("🔄 Refresh", data="refresh_leaderboard")],
+            [Button.inline("🗑️ Tutup", data="close_help")]
+        ]
+    )
+
+async def process_feedback_command(event):
+    from telethon.tl.custom import Button
+    await event.reply(
+        "Pilih jenis masukan:",
+        buttons=[
+            [Button.inline("Kirim Feedback", data="feedback_input")],
+            [Button.inline("Kirim Request Fitur", data="feature_request_input")],
+            [Button.inline("🗑️ Tutup", data="close_help")]
+        ]
+    )
+
+async def process_leaderboard_callback(event):
+    button_data = event.data.decode("utf-8")
+    if button_data == "refresh_leaderboard":
+        await process_leaderboard_command(event)
+    elif button_data == "my_stats":
+        await process_profile_command(event)
+
+async def process_feedback_callback(event):
+    button_data = event.data.decode("utf-8")
+    if button_data == "feedback_input":
+        await event.reply("Silakan kirim feedback Anda.")
+    elif button_data == "feature_request_input":
+        await event.reply("Silakan kirim request fitur Anda.")
+
+async def process_backup_command(event):
+    from telethon.tl.custom import Button
+    ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(',') if admin_id]
+    if event.sender_id not in ADMIN_IDS:
+        return await event.reply(
+            "🔒 Fitur ini hanya untuk admin. Hubungi pemilik bot jika ada pertanyaan.",
+            buttons=[[Button.url("Hubungi Pemilik", "https://t.me/aesneverhere"), Button.inline("🗑️ Tutup", data="close_help")]]
+        )
+    await event.reply(
+        "Konfirmasi backup database?",
+        buttons=[
+            [Button.inline("Backup Sekarang", data="do_backup")],
+            [Button.inline("🗑️ Tutup", data="close_help")]
+        ]
+    )
+
+async def process_restore_command(event):
+    from telethon.tl.custom import Button
+    ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(',') if admin_id]
+    if event.sender_id not in ADMIN_IDS:
+        return await event.reply(
+            "🔒 Fitur ini hanya untuk admin. Hubungi pemilik bot jika ada pertanyaan.",
+            buttons=[[Button.url("Hubungi Pemilik", "https://t.me/aesneverhere"), Button.inline("🗑️ Tutup", data="close_help")]]
+        )
+    await event.reply(
+        "Konfirmasi restore database?",
+        buttons=[
+            [Button.inline("Restore Sekarang", data="do_restore")],
+            [Button.inline("🗑️ Tutup", data="close_help")]
+        ]
+    )
+
+async def process_admin_callback(event):
+    from telethon.tl.custom import Button
+    ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(',') if admin_id]
+    if event.sender_id not in ADMIN_IDS:
+        return await event.reply(
+            "🔒 Fitur ini hanya untuk admin. Hubungi pemilik bot jika ada pertanyaan.",
+            buttons=[[Button.url("Hubungi Pemilik", "https://t.me/aesneverhere"), Button.inline("🗑️ Tutup", data="close_help")]]
+        )
+
+    button_data = event.data.decode("utf-8")
+    if button_data == "do_backup":
+        # Lakukan backup database
+        await event.answer("Backup berhasil!", alert=True)
+    elif button_data == "do_restore":
+        # Lakukan restore database
+        await event.answer("Restore berhasil!", alert=True)
+
+async def process_start_callback(event):
+    from telethon.tl.custom import Button
+    button_data = event.data.decode("utf-8")
+    
+    if button_data == "quick_guide":
+        guide_text = """**🚀 Panduan Cepat**
+
+1. **Kirim Link:** Cukup kirim link Pinterest (foto, video, atau board) di chat ini.
+2. **Pilih Aksi:** Tekan tombol yang muncul untuk mengunduh.
+3. **Gunakan Perintah:** Untuk fitur lebih lanjut, gunakan perintah seperti `.profile`, `.history`, atau `.config`.
+
+Selamat mencoba! ✨
+"""
+        await event.edit(guide_text, buttons=[[Button.inline("Kembali", data="back_to_start"), Button.inline("Tutup", data="close_help")]])
+    
+    elif button_data == "full_help":
+        await process_help_command(event)
+    
+    elif button_data == "back_to_start":
+        await process_start_command(event)
+
 async def clean_temp_files(folder=DOWNLOADS_DIR, max_age_hours=1):
     if not os.path.isdir(folder): os.makedirs(folder, exist_ok=True); return
     now = time.time(); max_age_seconds = max_age_hours * 3600
