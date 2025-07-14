@@ -16,7 +16,11 @@ from core import (
     process_config_command,
     update_user_activity,
     log_download,
-    check_user_quota
+    check_user_quota,
+    process_leaderboard_command,
+    process_feedback_command,
+    process_backup_command,
+    process_restore_command
 )
 
 logger = logging.getLogger(__name__)

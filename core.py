@@ -673,89 +673,48 @@ async def process_pboard_callback(event):
         original_cmd_msg = await button_message.get_reply_message()
         if not original_cmd_msg or not original_cmd_msg.text:
             return await event.answer("Gagal membaca perintah asli.", alert=True)
-        import re
+
         link_list = re.findall(r'https?://.*?(?=https?://|$)', original_cmd_msg.text)
         if not link_list:
             return await event.answer("Tidak ada link board valid ditemukan.", alert=True)
-        user = await event.client.get_entity(event.sender_id)
-        username = get_display_name(user)
-        all_files = []
-        all_captions = []
-        temp_dirs_to_remove = []
-        for idx, url in enumerate(link_list, 1):
+
+        msg = await event.edit(f"Found {len(link_list)} board link(s). Starting download in **{mode.upper()}** mode...")
+
+        for i, url in enumerate(link_list, 1):
             board_data = await get_all_pins_with_pagination(url)
             if not board_data.get("is_success"):
-                all_captions.append(f"❌ Board {idx}: {board_data.get('message')}")
+                await event.reply(f"❌ Board {i}: {board_data.get('message')}")
                 continue
+
             image_urls = board_data.get("image_urls")
             board_name = url.strip("/").split("/")[-1]
-            # Progress message
-            msg = await event.edit(f"⬇️ Downloading board {idx}/{len(link_list)}: {board_name}.zip\nUser: {username}\n0% [░░░░░░░░░░] 0/0\nSpeed: 0 B/s | Elapsed: 0s", buttons=[Button.inline("ℹ️ More Info", data=f"sysinfo:{idx}")])
-            start_time = time.time()
-            bytes_downloaded = 0
-            # Custom progress callback
-            def zip_progress(current, total, stage):
-                elapsed = time.time() - start_time
-                percent = int((current/total)*100) if total else 0
-                bar = '█' * (percent // 10) + '░' * (10 - percent // 10)
-                speed = get_speed_str(current, elapsed)
-                text = (f"⬇️ Downloading board {idx}/{len(link_list)}: {board_name}.zip\n"
-                        f"User: {username}\n"
-                        f"{percent}% [{bar}] {current}/{total}\n"
-                        f"Speed: {speed} | Elapsed: {int(elapsed*1000)} ms")
-                asyncio.run_coroutine_threadsafe(msg.edit(text, buttons=[Button.inline("ℹ️ More Info", data=f"sysinfo:{idx}")]), asyncio.get_event_loop())
+            total_images = len(image_urls)
+
+            await msg.edit(f"Downloading board {i}/{len(link_list)}: **{board_name}** ({total_images} pins)")
+
             if mode == 'zip':
                 loop = asyncio.get_event_loop()
-                zip_file_path = await loop.run_in_executor(None, _run_zip_process, f"{board_name}_{idx}", image_urls, zip_progress)
-                all_files.append(zip_file_path)
-                all_captions.append(f"✅ Board {idx}: ZIP siap!")
-                # Upload progress
-                async def upload_progress(current, total):
-                    elapsed = time.time() - start_time
-                    percent = int((current/total)*100) if total else 0
-                    bar = '█' * (percent // 10) + '░' * (10 - percent // 10)
-                    speed = get_speed_str(current, elapsed)
-                    text = (f"⬆️ Uploading: {os.path.basename(zip_file_path)}\nUser: {username}\n"
-                            f"{percent}% [{bar}] {current}/{total}\n"
-                            f"Speed: {speed} | Elapsed: {int(elapsed*1000)} ms")
-                    await msg.edit(text, buttons=[Button.inline("ℹ️ More Info", data=f"sysinfo:{idx}")])
-                await event.client.send_file(event.chat_id, file=zip_file_path, caption=f"ZIP Board {idx}", reply_to=original_cmd_msg.id, progress_callback=upload_progress)
+                zip_file_path = await loop.run_in_executor(None, _run_zip_process, board_name, image_urls)
+                await event.client.send_file(event.chat_id, file=zip_file_path, caption=f"✅ ZIP archive of board **'{board_name}'**.", reply_to=original_cmd_msg.id)
                 os.remove(zip_file_path)
-            else:
-                async def album_progress(current, total, stage):
-                    elapsed = time.time() - start_time
-                    percent = int((current/total)*100) if total else 0
-                    bar = '█' * (percent // 10) + '░' * (10 - percent // 10)
-                    speed = get_speed_str(current, elapsed)
-                    text = (f"⬇️ Downloading board {idx}/{len(link_list)}: {board_name}\nUser: {username}\n"
-                            f"{percent}% [{bar}] {current}/{total}\n"
-                            f"Speed: {speed} | Elapsed: {int(elapsed*1000)} ms")
-                    await msg.edit(text, buttons=[Button.inline("ℹ️ More Info", data=f"sysinfo:{idx}")])
-                temp_dir, downloaded_paths = await _download_for_album(f"{board_name}_{idx}", image_urls, album_progress)
-                if downloaded_paths:
-                    for i, file_path in enumerate(downloaded_paths, 1):
-                        async def upload_progress(current, total, file_path=file_path):
-                            elapsed = time.time() - start_time
-                            percent = int((current/total)*100) if total else 0
-                            bar = '█' * (percent // 10) + '░' * (10 - percent // 10)
-                            speed = get_speed_str(current, elapsed)
-                            text = (f"⬆️ Uploading: {os.path.basename(file_path)}\nUser: {username}\n"
-                                    f"{percent}% [{bar}] {current}/{total}\n"
-                                    f"Speed: {speed} | Elapsed: {int(elapsed*1000)} ms")
-                            await msg.edit(text, buttons=[Button.inline("ℹ️ More Info", data=f"sysinfo:{idx}")])
-                        await event.client.send_file(event.chat_id, file=file_path, caption=f"Board {idx}: {os.path.basename(file_path)}", reply_to=original_cmd_msg.id, progress_callback=upload_progress)
-                    all_files.extend(downloaded_paths)
-                    all_captions.append(f"✅ Board {idx}: {len(downloaded_paths)} file siap!")
-                temp_dirs_to_remove.append(temp_dir)
-        if not all_files:
-            return await event.edit("Tidak ada file yang berhasil diunduh dari link board yang diberikan.\n" + "\n".join(all_captions))
-        # Hapus semua temp_dir setelah pengiriman selesai
-        for temp_dir in temp_dirs_to_remove:
-            shutil.rmtree(temp_dir)
-        await event.edit("\n".join(all_captions))
+            else: # album mode
+                temp_dir, downloaded_paths = await _download_for_album(board_name, image_urls)
+                if not downloaded_paths:
+                    await event.reply(f"Failed to download images for board **{board_name}**.")
+                    continue
+                
+                for i in range(0, len(downloaded_paths), 10):
+                    batch = downloaded_paths[i:i+10]
+                    caption = f"✅ Album from board **'{board_name}'** ({i+1}-{i+len(batch)}/{total_images})" if i == 0 else ""
+                    await event.client.send_file(event.chat_id, file=batch, caption=caption, reply_to=original_cmd_msg.id)
+                    await asyncio.sleep(1)
+                shutil.rmtree(temp_dir)
+
+        await msg.edit("✅ All board downloads complete!")
+
     except Exception as e:
-        logger.error(f"Error di process_pboard_callback: {e}", exc_info=True)
-        await event.edit("❌ **Error!** Terjadi kesalahan.")
+        logger.error(f"Error in process_pboard_callback: {e}", exc_info=True)
+        await event.edit("❌ **Error!** An unexpected error occurred.")
 async def process_main_callback(event):
     callback_data = event.data.decode("utf-8")
     if callback_data == "close_help":
@@ -823,10 +782,31 @@ async def process_auto_download(event):
     elif action == "auto_video":
         await process_pinterest_video(event, url)
 
+def get_leaderboard(limit: int = 10) -> list:
+    """Get top downloaders from the database."""
+    with sqlite3.connect(DB_FILE) as con:
+        cur = con.cursor()
+        cur.execute("""
+            SELECT username, total_downloads
+            FROM users
+            WHERE total_downloads > 0
+            ORDER BY total_downloads DESC
+            LIMIT ?
+        """, (limit,))
+        return cur.fetchall()
+
 async def process_leaderboard_command(event):
     from telethon.tl.custom import Button
-    # Dummy data, ganti dengan query database
-    leaderboard_text = "🏆 **Top 5 Downloader**\n\n1. @user1 - 100 downloads\n2. @user2 - 95 downloads\n3. @user3 - 80 downloads\n4. @user4 - 70 downloads\n5. @user5 - 65 downloads"
+    
+    leaderboard_data = get_leaderboard(10)
+    
+    if not leaderboard_data:
+        leaderboard_text = "🏆 **Papan Peringkat**\n\nBelum ada yang melakukan download. Jadilah yang pertama!"
+    else:
+        leaderboard_text = "🏆 **Top 10 Downloader**\n\n"
+        for i, (username, total_downloads) in enumerate(leaderboard_data, 1):
+            leaderboard_text += f"**{i}.** @{username or 'N/A'} - `{total_downloads}` downloads\n"
+            
     await event.reply(
         leaderboard_text,
         buttons=[
@@ -854,16 +834,44 @@ async def process_leaderboard_callback(event):
         await process_profile_command(event)
 
 async def process_feedback_callback(event):
+    from telethon.tl.custom import Button
+    from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
+
     button_data = event.data.decode("utf-8")
-    if button_data == "feedback_input":
-        await event.reply("Silakan kirim feedback Anda.")
-    elif button_data == "feature_request_input":
-        await event.reply("Silakan kirim request fitur Anda.")
+    feedback_type = "Feedback"
+    if button_data == "feature_request_input":
+        feedback_type = "Request Fitur"
+
+    try:
+        async with event.client.conversation(event.sender_id, timeout=300) as conv:
+            await conv.send_message(f"✍️ Silakan tulis dan kirim **{feedback_type}** Anda. Saya akan meneruskannya ke admin.")
+            
+            response = await conv.get_response()
+            
+            # Forward to admin
+            admin_id = int(os.getenv("ADMIN_IDS", "").split(',')[0]) # Ambil admin pertama
+            await event.client.forward_messages(admin_id, response)
+            
+            await conv.send_message("✅ Terima kasih! Pesan Anda telah diteruskan ke admin.")
+            await event.delete() # Hapus tombol asli
+
+    except asyncio.TimeoutError:
+        await event.reply("Waktu habis. Silakan coba lagi.")
+    except Exception as e:
+        logger.error(f"Gagal memproses feedback: {e}")
+        await event.reply("Terjadi kesalahan saat memproses masukan Anda.")
+
+def is_admin(user_id: int) -> bool:
+    """Check if a user is an admin."""
+    admin_ids_str = os.getenv("ADMIN_IDS", "")
+    if not admin_ids_str:
+        return False
+    admin_ids = [int(admin_id) for admin_id in admin_ids_str.split(',') if admin_id.strip().isdigit()]
+    return user_id in admin_ids
 
 async def process_backup_command(event):
     from telethon.tl.custom import Button
-    ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(',') if admin_id]
-    if event.sender_id not in ADMIN_IDS:
+    if not is_admin(event.sender_id):
         return await event.reply(
             "🔒 Fitur ini hanya untuk admin. Hubungi pemilik bot jika ada pertanyaan.",
             buttons=[[Button.url("Hubungi Pemilik", "https://t.me/aesneverhere"), Button.inline("🗑️ Tutup", data="close_help")]]
@@ -878,8 +886,7 @@ async def process_backup_command(event):
 
 async def process_restore_command(event):
     from telethon.tl.custom import Button
-    ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(',') if admin_id]
-    if event.sender_id not in ADMIN_IDS:
+    if not is_admin(event.sender_id):
         return await event.reply(
             "🔒 Fitur ini hanya untuk admin. Hubungi pemilik bot jika ada pertanyaan.",
             buttons=[[Button.url("Hubungi Pemilik", "https://t.me/aesneverhere"), Button.inline("🗑️ Tutup", data="close_help")]]
@@ -894,8 +901,7 @@ async def process_restore_command(event):
 
 async def process_admin_callback(event):
     from telethon.tl.custom import Button
-    ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(',') if admin_id]
-    if event.sender_id not in ADMIN_IDS:
+    if not is_admin(event.sender_id):
         return await event.reply(
             "🔒 Fitur ini hanya untuk admin. Hubungi pemilik bot jika ada pertanyaan.",
             buttons=[[Button.url("Hubungi Pemilik", "https://t.me/aesneverhere"), Button.inline("🗑️ Tutup", data="close_help")]]
@@ -903,11 +909,26 @@ async def process_admin_callback(event):
 
     button_data = event.data.decode("utf-8")
     if button_data == "do_backup":
-        # Lakukan backup database
-        await event.answer("Backup berhasil!", alert=True)
+        try:
+            backup_file = f"backup_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.db"
+            shutil.copyfile(DB_FILE, backup_file)
+            await event.client.send_file(
+                event.chat_id,
+                backup_file,
+                caption=f"✅ **Backup Berhasil**\n\nFile: `{backup_file}`\nUkuran: `{humanbytes(os.path.getsize(backup_file))}`"
+            )
+            os.remove(backup_file)
+            await event.answer("Backup berhasil dikirim!", alert=True)
+        except Exception as e:
+            logger.error(f"Backup gagal: {e}")
+            await event.answer(f"❌ Backup gagal: {e}", alert=True)
+
     elif button_data == "do_restore":
-        # Lakukan restore database
-        await event.answer("Restore berhasil!", alert=True)
+        await event.answer("Silakan kirim file backup (.db) untuk merestore.", alert=True)
+        # Here you would typically wait for the user to send a file
+        # This requires conversation handling which is more complex.
+        # For now, we just prompt the user.
+        pass
 
 async def process_start_callback(event):
     from telethon.tl.custom import Button

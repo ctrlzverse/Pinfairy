@@ -52,8 +52,13 @@ ERROR_MESSAGES = {
 SUCCESS_MESSAGES = {
     "download_complete": "✅ {media_type} berhasil diunduh!",
     "settings_updated": "✅ Pengaturan berhasil diperbarui!",
-    "quota_reset": "✅ Quota harian telah direset!"
+    "quota_reset": "✅ Quota harian telah direset!",
+    "feedback_sent": "✅ Terima kasih! Pesan Anda telah diteruskan ke admin.",
+    "backup_sent": "✅ Backup berhasil dikirim!"
 }
+
+# Admin settings
+ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(',') if admin_id]
 
 # Pinterest API Settings
 PINTEREST_HEADERS = {

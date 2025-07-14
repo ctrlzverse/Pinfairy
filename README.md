@@ -1,4 +1,3 @@
-
 <p align="center">
   <img src="https://github.com/images/mona-whisper.gif" alt="Pinfairybot Logo" width="150"/>
 </p>
@@ -91,320 +90,85 @@ PinfairyBot is an advanced Telegram bot that helps you download high-quality ima
 
 ---
 
-## ⚙️ Setup
+## 🚀 Deployment
 
-### Prerequisites
+### 🖥️ Local / VPS (Recommended)
 
-- Python 3.10 or higher
-- Telegram Bot Token
-- Pinterest access (no API key required)
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/aes-co/Pinfairybot.git
+    cd Pinfairybot
+    ```
 
-### Installation Steps
+2.  **Install dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/aeswnh/Pinfairybot.git
-   cd Pinfairybot
-   ```
+3.  **Set up environment variables:**
+    Create a `.env` file by copying `.env.example` and fill in your credentials.
+    ```bash
+    cp .env.example .env
+    # Edit .env with your values
+    ```
 
-2. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-   
-   Or using Poetry:
-   ```bash
-   poetry install
-   ```
+4.  **Install Playwright browsers:**
+    ```bash
+    playwright install
+    ```
 
-3. **Set up environment variables:**
-   Create a `.env` file with:
-   ```env
-   API_ID=your_telegram_api_id
-   API_HASH=your_telegram_api_hash
-   BOT_TOKEN=your_bot_token
-   FORCE_SUB_CHANNEL=@your_channel
-   ADMIN_IDS=your_admin_id1,your_admin_id2
-   ```
+5.  **Run the bot:**
+    ```bash
+    python bot.py
+    ```
 
-4. **Initialize Playwright:**
-   ```bash
-   playwright install chromium
-   ```
+### ☁️ Replit (Cloud Deployment)
 
-5. **Run the bot:**
-   ```bash
-   python bot.py
-   ```
+Due to Replit's limitations, Playwright cannot run locally. The bot is configured to use a remote browser via [browserless.io](https://www.browserless.io/).
+
+1.  **Fork the repository** on GitHub.
+
+2.  **Create a new Replit** and import the forked repository.
+
+3.  **Get a `browserless.io` API Token:**
+    -   Sign up for a **free account** at [browserless.io](https://www.browserless.io/).
+    -   Copy your API token.
+
+4.  **Add Replit Secrets:**
+    -   In your Replit project, go to the "Secrets" tab.
+    -   Add your Telegram and `browserless.io` credentials:
+        -   `API_ID`: Your Telegram API ID.
+        -   `API_HASH`: Your Telegram API Hash.
+        -   `BOT_TOKEN`: Your Telegram Bot Token.
+        -   `ADMIN_IDS`: Your user ID for admin commands.
+        -   `BROWSERLESS_TOKEN`: Your token from `browserless.io`.
+
+5.  **Run the bot:**
+    -   Click the "Run" button. Replit will automatically install dependencies and start the bot. No need to run `playwright install`.
+
+---
+
+## 🙏 Acknowledgements
+
+A special thanks to the following for their invaluable contributions:
+
+-   **[OnlineProxy-io](https://github.com/OnlineProxy-io)**: For providing the crucial insight and solution to run Playwright on limited environments like Replit using a remote browser service. This project's Replit compatibility is a direct result of their [helpful suggestion](https://github.com/aes-co/Pinfairybot/issues/1#issuecomment-3031631107).
 
 ---
 
 ## 🏗️ Architecture
 
-### Project Structure
-```
-Pinfairybot/
-├── bot.py                 # Main bot entry point
-├── core.py               # Core functionality and utilities
-├── config.py             # Configuration settings
-├── handlers/             # Command and callback handlers
-│   ├── commands.py       # Command handlers
-│   └── callbacks.py      # Button callback handlers
-├── modules/              # Feature modules
-│   └── pinterest.py      # Pinterest scraping logic
-├── downloads/            # Temporary download directory
-├── requirements.txt      # Python dependencies
-├── pyproject.toml       # Poetry configuration
-└── FEATURES.md          # Detailed feature documentation
-```
-
-### Key Components
-
-- **Modular Design** - Separated handlers for commands and callbacks
-- **Database Integration** - SQLite for user data and performance metrics
-- **Async Processing** - Non-blocking operations for better performance
-- **Background Tasks** - Automated cleanup and monitoring
-- **Error Handling** - Comprehensive error logging and user feedback
-
----
-
-## 📊 Database Schema
-
-The bot uses SQLite with the following tables:
-
-- **users** - User profiles and settings
-- **download_history** - Download attempt logs
-- **download_stats** - Global download statistics
-- **performance_metrics** - System performance data
-
----
-
-## 🔧 Configuration
-
-### User Settings
-- **Language**: Indonesian (ID) / English (EN)
-- **Notifications**: Enable/Disable bot notifications
-- **Download Quality**: High/Medium/Low resolution options
-
-### System Settings
-- **Daily Quota**: 100 downloads per user (configurable)
-- **Rate Limiting**: 3 seconds between requests
-- **Max Boards**: 5 boards per request
-- **File Cleanup**: Automatic cleanup after 1 hour
-
----
-
-## 🚀 Advanced Features
-
-### Smart Download System
-- **Resolution Priority** - Always attempts highest quality first
-- **Fallback Mechanisms** - Multiple scraping methods for reliability
-- **Progress Tracking** - Real-time progress for large downloads
-- **Error Recovery** - Automatic retry on temporary failures
-
-### Performance Monitoring
-- **System Metrics** - CPU, RAM, and disk usage tracking
-- **Response Times** - API response time monitoring
-- **Error Rates** - Download success/failure statistics
-- **User Analytics** - Usage patterns and activity tracking
-
-### Security Features
-- **Input Sanitization** - Prevents malicious input
-- **URL Validation** - Ensures Pinterest domain compliance
-- **Quota Enforcement** - Prevents abuse with daily limits
-- **Rate Limiting** - Protects against spam and overload
-
----
-
-## 📈 Performance
-
-- **Async Operations** - Non-blocking download processing
-- **Memory Efficient** - Optimized for low resource usage
-- **Scalable Design** - Handles multiple concurrent users
-- **Background Processing** - Automated maintenance tasks
-
----
-
-## 🔌 Plugin System
-
-Pinfairybot features a modular plugin architecture:
-
-- **Handler Modules** - Easy command and callback management
-- **Feature Modules** - Isolated functionality for different services
-- **Configuration System** - Centralized settings management
-- **Database Abstraction** - Clean data access layer
-
----
-
-## 🤝 Contributing
-
-We welcome contributions! Here's how you can help:
-
-1. **Fork the repository**
-2. **Create a feature branch** (`git checkout -b feature/amazing-feature`)
-3. **Commit your changes** (`git commit -m 'Add amazing feature'`)
-4. **Push to the branch** (`git push origin feature/amazing-feature`)
-5. **Open a Pull Request**
-
-### Development Guidelines
-- Follow PEP 8 style guidelines
-- Add docstrings to all functions
-- Include error handling for all operations
-- Test new features thoroughly
-
----
-
-## 📝 Credits
-
-- **Developer**: [aes-co](https://github.com/aes-co) / [@aesneverhere](https://t.me/aesneverhere)
-- **Framework**: [Telethon](https://github.com/LonamiWebs/Telethon) for Telegram integration
-- **Web Scraping**: [Playwright](https://github.com/microsoft/playwright) and [BeautifulSoup](https://www.crummy.com/software/BeautifulSoup/)
-- **HTTP Client**: [httpx](https://github.com/encode/httpx) for async requests
-- **System Monitoring**: [psutil](https://github.com/giampaolo/psutil) for performance metrics
-
----
-
-## 📜 License
-
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
----
-
-## 🚀 Deployment Options
-
-### 🖥️ VPS/Dedicated Server (Recommended)
-Deployment pada VPS atau dedicated server memberikan performa terbaik dan support penuh untuk Playwright:
-
-1. **Persiapan Server:**
-   ```bash
-   # Update system
-   sudo apt update && sudo apt upgrade -y
-   
-   # Install dependencies
-   sudo apt install -y python3-pip python3-venv git wget curl unzip
-   
-   # Install Chrome dependencies
-   sudo apt install -y ca-certificates fonts-liberation libappindicator3-1 libasound2 libatk-bridge2.0-0 \
-   libatk1.0-0 libc6 libcairo2 libcups2 libdbus-1-3 libexpat1 libfontconfig1 libgbm1 libgcc1 libglib2.0-0 \
-   libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libpangocairo-1.0-0 libstdc++6 libx11-6 libx11-xcb1 libxcb1 \
-   libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 libxtst6 \
-   lsb-release xdg-utils
-   ```
-
-2. **Clone & Setup:**
-   ```bash
-   # Clone repository
-   git clone https://github.com/aeswnh/Pinfairybot.git
-   cd Pinfairybot
-   
-   # Create virtual environment
-   python3 -m venv .venv
-   source .venv/bin/activate
-   
-   # Install requirements
-   pip install -r requirements.txt
-   
-   # Install Playwright with dependencies
-   playwright install chromium
-   playwright install-deps chromium
-   ```
-
-3. **Configuration:**
-   ```bash
-   # Setup environment variables
-   cp .env.example .env
-   nano .env  # Edit with your credentials
-   ```
-
-4. **Run with PM2:**
-   ```bash
-   # Install PM2
-   curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
-   sudo apt install -y nodejs
-   sudo npm install -g pm2
-   
-   # Create PM2 config
-   echo '{
-     "apps": [{
-       "name": "pinfairybot",
-       "script": "python3",
-       "args": "bot.py",
-       "interpreter": ".venv/bin/python3",
-       "cwd": "/path/to/Pinfairybot",
-       "env": {
-         "PYTHONUNBUFFERED": "1"
-       }
-     }]
-   }' > ecosystem.config.json
-   
-   # Start bot
-   pm2 start ecosystem.config.json
-   pm2 save
-   ```
-
-### ☁️ Railway.app (Alternative)
-Railway.app menyediakan environment yang mendukung Playwright:
-
-1. **Fork repository** ke GitHub Anda
-
-2. **Deploy di Railway:**
-   - Buka [Railway.app](https://railway.app)
-   - Connect dengan GitHub
-   - Select repository yang sudah di-fork
-   - Add environment variables dari `.env.example`
-   - Railway akan mendeteksi dan menginstall dependencies otomatis
-
-3. **Konfigurasi Build:**
-   ```toml
-   # railway.toml
-   [build]
-   builder = "nixpacks"
-   buildCommand = "pip install -r requirements.txt && playwright install chromium && playwright install-deps chromium"
-   
-   [deploy]
-   startCommand = "python bot.py"
-   healthcheckPath = "/"
-   restartPolicyType = "on_failure"
-   ```
-
-### 🌐 Google Cloud Run (Alternative)
-Google Cloud Run juga mendukung Playwright dengan konfigurasi Docker:
-
-1. **Buat Dockerfile:**
-   ```dockerfile
-   FROM mcr.microsoft.com/playwright/python:latest
-   
-   WORKDIR /app
-   COPY . .
-   
-   RUN pip install -r requirements.txt
-   RUN playwright install chromium
-   
-   CMD ["python", "bot.py"]
-   ```
-
-2. **Deploy:**
-   ```bash
-   # Build & push
-   gcloud builds submit --tag gcr.io/PROJECT_ID/pinfairybot
-   
-   # Deploy to Cloud Run
-   gcloud run deploy pinfairybot \
-     --image gcr.io/PROJECT_ID/pinfairybot \
-     --platform managed \
-     --allow-unauthenticated
-   ```
-
-### ⚠️ Note for Replit Users
-Replit memiliki keterbatasan dalam menjalankan Playwright. Sebagai alternatif, gunakan salah satu opsi deployment di atas atau modifikasi kode untuk menggunakan `requests` dan `BeautifulSoup4` sebagai pengganti Playwright.
+-   **Modular Design**: Separated handlers for commands and callbacks.
+-   **Database Integration**: SQLite for user data and performance metrics.
+-   **Async Processing**: Non-blocking operations for better performance.
+-   **Remote Browser**: Uses `browserless.io` for Playwright tasks on limited platforms.
 
 ---
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/aeswnh/Pinfairybot/issues)
-- **Telegram**: [@aesneverhere](https://t.me/aesneverhere)
-- **Channel**: [@aes_hub](https://t.me/aes_hub)
+-   **Issues**: [GitHub Issues](https://github.com/aes-co/Pinfairybot/issues)
+-   **Telegram**: [@aesneverhere](https://t.me/aesneverhere)
 
 ---
 

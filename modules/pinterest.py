@@ -4,9 +4,23 @@ from bs4 import BeautifulSoup
 import json
 import re
 import asyncio
+import os
 from playwright.async_api import async_playwright
 
 logger = logging.getLogger(__name__)
+
+BROWSERLESS_TOKEN = os.getenv("BROWSERLESS_TOKEN")
+
+async def _get_browser():
+    """Connect to a remote browser if a token is available, otherwise launch a local one."""
+    p = await async_playwright().start()
+    if BROWSERLESS_TOKEN:
+        logger.info("Connecting to remote browser via browserless.io...")
+        endpoint = f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}"
+        return await p.chromium.connect_over_cdp(endpoint)
+    else:
+        logger.info("Launching local browser...")
+        return await p.chromium.launch()
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
@@ -80,11 +94,9 @@ async def get_all_pins_with_pagination(board_url: str) -> dict:
                 # Fallback ke Playwright jika scraping manual gagal
                 logger.info("[Pinterest] Fallback ke Playwright untuk scraping board.")
                 try:
-                    from playwright.async_api import async_playwright
-                    async with async_playwright() as p:
-                        browser = await p.chromium.launch(executable_path="/usr/bin/google-chrome-stable")
-                        page = await browser.new_page()
-                        await page.goto(board_url, wait_until="domcontentloaded", timeout=60000)
+                    browser = await _get_browser()
+                    page = await browser.new_page()
+                    await page.goto(board_url, wait_until="domcontentloaded", timeout=60000)
                         
                         # Scroll down multiple times to load all pins
                         for _ in range(5):
@@ -249,14 +261,13 @@ async def search_pins(query: str, limit: int = 10) -> dict:
     logger.info(f"Memulai pencarian (metode Playwright) untuk query: '{query}'")
     search_url = f"https://www.pinterest.com/search/pins/?q={query}"
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch()
-            page = await browser.new_page()
-            await page.goto(search_url, timeout=60000)
-            await page.wait_for_selector('[data-test-id="pin-visual-wrapper"]', timeout=30000)
-            await page.evaluate("window.scrollBy(0, 1000)"); await asyncio.sleep(2)
-            html_content = await page.content()
-            await browser.close()
+        browser = await _get_browser()
+        page = await browser.new_page()
+        await page.goto(search_url, timeout=60000)
+        await page.wait_for_selector('[data-test-id="pin-visual-wrapper"]', timeout=30000)
+        await page.evaluate("window.scrollBy(0, 1000)"); await asyncio.sleep(2)
+        html_content = await page.content()
+        await browser.close()
         found_urls = re.findall(r'https://i\.pinimg\.com/originals[^\s"]+\.jpg', html_content)
         if not found_urls:
              found_urls.extend(re.findall(r'https://i\.pinimg\.com/736x[^\s"]+\.jpg', html_content))
