@@ -97,15 +97,15 @@ async def get_all_pins_with_pagination(board_url: str) -> dict:
                     browser = await _get_browser()
                     page = await browser.new_page()
                     await page.goto(board_url, wait_until="domcontentloaded", timeout=60000)
-                        
-                        # Scroll down multiple times to load all pins
-                        for _ in range(5):
-                            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                            await page.wait_for_timeout(2000) # Wait for content to load
-                        
-                        await page.wait_for_load_state("networkidle", timeout=30000)
-                        html_content = await page.content()
-                        await browser.close()
+                    
+                    # Scroll down multiple times to load all pins
+                    for _ in range(5):
+                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        await page.wait_for_timeout(2000)  # Wait for content to load
+                    
+                    await page.wait_for_load_state("networkidle", timeout=30000)
+                    html_content = await page.content()
+                    await browser.close()
                     
                     found_urls = re.findall(r'https://i\.pinimg\.com/[^\s"\']+', html_content)
                     logger.debug(f"[Pinterest] Playwright menemukan {len(found_urls)} gambar di board.")
