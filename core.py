@@ -1019,6 +1019,49 @@ async def process_restore_command(event):
         ]
     )
 
+async def process_contributors_command(event):
+    """Process the contributors command to display project contributors."""
+    from telethon.tl.custom import Button
+    
+    contributors_text = """**🧚 Pinfairy Bot - Contributors** ✨
+
+**👥 Core Team:**
+• **aes** - Creator & Maintainer
+  - Initial development, Pinterest integration, core features
+
+**🤝 Contributors Welcome!**
+Kami terbuka untuk kontribusi dari komunitas!
+
+**💡 Cara Berkontribusi:**
+1. Fork repository di GitHub
+2. Buat fitur baru atau perbaiki bug
+3. Kirim Pull Request
+4. Jadilah bagian dari pengembangan!
+
+**📋 Daftar Kontribusi:**
+- Bug fixes
+- Fitur baru
+- Dokumentasi
+- Optimasi kode
+
+**📞 Kontak:**
+- GitHub: @aes-co/PinfairyBot
+- Telegram: @aesneverhere
+
+**🎯 Untuk melihat daftar lengkap kontributor:**
+Kunjungi file CONTRIBUTORS.md atau repository GitHub kami
+
+**Terima kasih telah menggunakan Pinfairy Bot!** 🧚✨"""
+
+    await event.reply(
+        contributors_text,
+        buttons=[
+            [Button.url("📂 Lihat Daftar Lengkap", "https://github.com/aes-co/PinfairyBot/blob/main/CONTRIBUTORS.md")],
+            [Button.url("⭐ GitHub Repository", "https://github.com/aes-co/PinfairyBot")],
+            [Button.inline("🗑️ Tutup", data="close_help")]
+        ]
+    )
+
 async def process_admin_callback(event):
     from telethon.tl.custom import Button
     if not is_admin(event.sender_id):

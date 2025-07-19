@@ -21,7 +21,8 @@ from core import (
     process_leaderboard_command,
     process_feedback_command,
     process_backup_command,
-    process_restore_command
+    process_restore_command,
+    process_contributors_command
 )
 
 logger = logging.getLogger(__name__)
