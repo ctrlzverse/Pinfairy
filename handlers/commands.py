@@ -1,5 +1,6 @@
 import logging
 import re
+from telethon.tl.custom import Button
 from core import (
     process_start_command,
     process_pinterest_photo,
@@ -46,19 +47,16 @@ async def handle_pinterest_photo(event):
         
         # Check if URL is provided
         if not event.pattern_match.group(1):
-            from telethon.tl.custom import Button
             return await event.reply(USAGE_MESSAGES["photo"], buttons=[Button.inline("🗑️ Tutup", data="close_help")])
             
         # Check quota
         quota_check = check_user_quota(event.sender_id)
         if not quota_check["allowed"]:
-            from telethon.tl.custom import Button
             return await event.reply(f"⚠️ Quota harian Anda sudah habis. Sisa: {quota_check['remaining']}", buttons=[Button.inline("🗑️ Tutup", data="close_help")])
             
         # Check rate limit
         rate_check = check_rate_limit(event.sender_id)
         if not rate_check["allowed"]:
-            from telethon.tl.custom import Button
             return await event.reply(rate_check["message"], buttons=[Button.inline("🗑️ Tutup", data="close_help")])
 
         # Get and validate URL
@@ -66,7 +64,6 @@ async def handle_pinterest_photo(event):
         validation = validate_pinterest_url(url)
         if not validation["is_valid"]:
             log_download(event.sender_id, "photo", url, False, validation["message"])
-            from telethon.tl.custom import Button
             return await event.reply(validation["message"], buttons=[Button.inline("🗑️ Tutup", data="close_help")])
 
         try:
@@ -78,7 +75,6 @@ async def handle_pinterest_photo(event):
             
     except Exception as e:
         logger.error(f"Error di handle_pinterest_photo: {e}", exc_info=True)
-        from telethon.tl.custom import Button
         await event.reply("❌ Terjadi kesalahan saat memproses foto.", buttons=[Button.inline("🗑️ Tutup", data="close_help")])
 
 async def handle_pinterest_video(event):
