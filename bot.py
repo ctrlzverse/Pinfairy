@@ -23,6 +23,7 @@ try:
     )
     from handlers.callbacks import handle_button_press
     from core import clean_temp_files, init_db, log_performance_metric, validate_pinterest_url
+    from config import BOT_PREFIX
 except ImportError as e:
     print(f"❌ Gagal mengimpor handler: {e}"); sys.exit(1)
 
@@ -43,34 +44,34 @@ async def main():
     logger.info("Mendaftarkan semua event handler...")
     
     # Core commands
-    client.add_event_handler(handle_start, events.NewMessage(pattern=r'^[./]start$'))
+    client.add_event_handler(handle_start, events.NewMessage(pattern=rf'^{re.escape(BOT_PREFIX)}start$'))
     client.add_event_handler(handle_button_press, events.CallbackQuery())
-    client.add_event_handler(handle_help, events.NewMessage(pattern=r'^\.help$'))
-    client.add_event_handler(handle_stats, events.NewMessage(pattern=r'^\.stats$'))
-    client.add_event_handler(handle_alive, events.NewMessage(pattern=r'^\.alive$'))
+    client.add_event_handler(handle_help, events.NewMessage(pattern=rf'^{re.escape(BOT_PREFIX)}help$'))
+    client.add_event_handler(handle_stats, events.NewMessage(pattern=rf'^{re.escape(BOT_PREFIX)}stats$'))
+    client.add_event_handler(handle_alive, events.NewMessage(pattern=rf'^{re.escape(BOT_PREFIX)}alive$'))
     
     # Pinterest commands
-    client.add_event_handler(handle_pinterest_photo, events.NewMessage(pattern=r'^\.p(?:\s+(https://.*)|$)'))
-    client.add_event_handler(handle_pinterest_video, events.NewMessage(pattern=r'^\.pv(?:\s+(https://.*)|$)'))
-    client.add_event_handler(handle_board_link, events.NewMessage(pattern=r'^\.pboard(?:\s+(https://[^\s]+/.*?/.*?/?)|$)'))
-    client.add_event_handler(handle_search, events.NewMessage(pattern=r'^\.search(?:\s+(.+)|$)'))
+    client.add_event_handler(handle_pinterest_photo, events.NewMessage(pattern=rf'^{re.escape(BOT_PREFIX)}p(?:\s+(https://.*)|$)'))
+    client.add_event_handler(handle_pinterest_video, events.NewMessage(pattern=rf'^{re.escape(BOT_PREFIX)}pv(?:\s+(https://.*)|$)'))
+    client.add_event_handler(handle_board_link, events.NewMessage(pattern=rf'^{re.escape(BOT_PREFIX)}pboard(?:\s+(https://[^\s]+/.*?/.*?/?)|$)'))
+    client.add_event_handler(handle_search, events.NewMessage(pattern=rf'^{re.escape(BOT_PREFIX)}search(?:\s+(.+)|$)'))
     
     # User management commands
-    client.add_event_handler(handle_profile, events.NewMessage(pattern=r'^\.profile$'))
-    client.add_event_handler(handle_history, events.NewMessage(pattern=r'^\.history$'))
-    client.add_event_handler(handle_quota, events.NewMessage(pattern=r'^\.quota$'))
-    client.add_event_handler(handle_config, events.NewMessage(pattern=r'^\.config$'))
-    client.add_event_handler(handle_leaderboard, events.NewMessage(pattern=r'^\.leaderboard$'))
-    client.add_event_handler(handle_feedback, events.NewMessage(pattern=r'^\.feedback$'))
-    client.add_event_handler(handle_backup, events.NewMessage(pattern=r'^\.backup$'))
-    client.add_event_handler(handle_restore, events.NewMessage(pattern=r'^\.restore$'))
+    client.add_event_handler(handle_profile, events.NewMessage(pattern=rf'^{re.escape(BOT_PREFIX)}profile$'))
+    client.add_event_handler(handle_history, events.NewMessage(pattern=rf'^{re.escape(BOT_PREFIX)}history$'))
+    client.add_event_handler(handle_quota, events.NewMessage(pattern=rf'^{re.escape(BOT_PREFIX)}quota$'))
+    client.add_event_handler(handle_config, events.NewMessage(pattern=rf'^{re.escape(BOT_PREFIX)}config$'))
+    client.add_event_handler(handle_leaderboard, events.NewMessage(pattern=rf'^{re.escape(BOT_PREFIX)}leaderboard$'))
+    client.add_event_handler(handle_feedback, events.NewMessage(pattern=rf'^{re.escape(BOT_PREFIX)}feedback$'))
+    client.add_event_handler(handle_backup, events.NewMessage(pattern=rf'^{re.escape(BOT_PREFIX)}backup$'))
+    client.add_event_handler(handle_restore, events.NewMessage(pattern=rf'^{re.escape(BOT_PREFIX)}restore$'))
     
     logger.info("✅ Semua handler berhasil didaftarkan.")
 
     # Auto-detect Pinterest link in any message
     @client.on(events.NewMessage(incoming=True))
     async def auto_detect_link(event):
-        if not event.text or event.text.startswith('.') or event.text.startswith('/'):
+        if not event.text or event.text.startswith(BOT_PREFIX):
             return
 
         match = re.search(r'(https?://(www\.)?(id\.)?pinterest\.com/[^\s]+|https?://pin\.it/[^\s]+)', event.text)

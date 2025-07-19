@@ -6,6 +6,11 @@ Contains all configurable settings and constants
 import os
 
 # Bot Configuration
+BOT_PREFIX = os.getenv("BOT_PREFIX", "/")
+if not BOT_PREFIX or BOT_PREFIX.strip() == "":
+    BOT_PREFIX = "/"
+BOT_PREFIX = BOT_PREFIX.strip()
+
 DEFAULT_DAILY_QUOTA = 100
 RATE_LIMIT_SECONDS = 3
 MAX_BOARDS_PER_REQUEST = 5
