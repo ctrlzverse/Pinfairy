@@ -140,8 +140,9 @@ Due to Replit's limitations, Playwright cannot run locally. The bot is configure
         -   `API_ID`: Your Telegram API ID.
         -   `API_HASH`: Your Telegram API Hash.
         -   `BOT_TOKEN`: Your Telegram Bot Token.
-        -   `ADMIN_IDS`: Your user ID for admin commands.
-        -   `BROWSERLESS_TOKEN`: Your token from `browserless.io`.
+    -   `ADMIN_IDS`: Your user ID for admin commands.
+    -   `BROWSERLESS_TOKEN`: Your token from `browserless.io`.
+    -   `BOT_PREFIX`: Custom command prefix (e.g., `.`, `!`, `/`). Default is `/`.
 
 5.  **Run the bot:**
     -   Click the "Run" button. Replit will automatically install dependencies and start the bot. No need to run `playwright install`.
