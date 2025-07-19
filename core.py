@@ -472,23 +472,66 @@ def format_uptime(start_time):
     return " ".join(parts) if parts else "0s"
 
 def _run_zip_process(board_name, image_urls, progress_callback=None):
-    temp_dir = os.path.join(DOWNLOADS_DIR, board_name); os.makedirs(temp_dir, exist_ok=True)
-    total = len(image_urls)
-    with httpx.Client() as client:
-        for i, url in enumerate(image_urls):
-            try:
-                r = client.get(url, timeout=20.0)
-                if r.status_code == 200:
-                    with open(os.path.join(temp_dir, f"{i+1:04d}.jpg"), 'wb') as f: f.write(r.content)
-                if progress_callback:
-                    progress_callback(i+1, total, 'download')
-            except Exception as e:
-                logger.warning(f"Gagal mengunduh {url}: {e}")
-    zip_path = os.path.join(DOWNLOADS_DIR, f"{board_name}.zip")
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for f in os.listdir(temp_dir): zf.write(os.path.join(temp_dir, f), arcname=f)
-    shutil.rmtree(temp_dir)
-    return zip_path
+    """Create ZIP file from image URLs."""
+    try:
+        # Ensure downloads directory exists
+        os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+        
+        # Create temporary directory for downloads
+        temp_dir = os.path.join(DOWNLOADS_DIR, f"temp_{board_name}_{int(time.time())}")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        total = len(image_urls)
+        downloaded_count = 0
+        
+        with httpx.Client() as client:
+            for i, url in enumerate(image_urls):
+                try:
+                    r = client.get(url, timeout=20.0)
+                    if r.status_code == 200:
+                        # Ensure we have a valid filename
+                        filename = f"{i+1:04d}.jpg"
+                        file_path = os.path.join(temp_dir, filename)
+                        
+                        with open(file_path, 'wb') as f:
+                            f.write(r.content)
+                        downloaded_count += 1
+                        
+                        logger.info(f"Downloaded image {i+1}/{total}: {filename}")
+                    
+                    if progress_callback:
+                        progress_callback(i+1, total, 'download')
+                        
+                except Exception as e:
+                    logger.warning(f"Gagal mengunduh {url}: {e}")
+                    continue
+        
+        if downloaded_count == 0:
+            shutil.rmtree(temp_dir)
+            raise Exception("Tidak ada gambar yang berhasil diunduh")
+        
+        # Create ZIP file
+        zip_filename = f"{board_name}_{int(time.time())}.zip"
+        zip_path = os.path.join(DOWNLOADS_DIR, zip_filename)
+        
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for filename in os.listdir(temp_dir):
+                file_path = os.path.join(temp_dir, filename)
+                if os.path.isfile(file_path):
+                    zf.write(file_path, arcname=filename)
+        
+        # Clean up temporary directory
+        shutil.rmtree(temp_dir)
+        
+        logger.info(f"ZIP file created successfully: {zip_path}")
+        return zip_path
+        
+    except Exception as e:
+        logger.error(f"Error creating ZIP: {e}")
+        # Clean up on error
+        if 'temp_dir' in locals() and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        raise e
 async def _download_for_album(board_name, image_urls, progress_callback=None):
     temp_dir = os.path.join(DOWNLOADS_DIR, board_name); os.makedirs(temp_dir, exist_ok=True)
     downloaded_paths = []
@@ -564,12 +607,30 @@ async def process_pinterest_board(event, url: str, mode: str):
         def sync_progress(current, total, stage):
             asyncio.run_coroutine_threadsafe(_progress_message(event, current, total, stage, msg), asyncio.get_event_loop())
         if mode == 'zip':
-            loop = asyncio.get_event_loop(); zip_file_path = await loop.run_in_executor(None, _run_zip_process, board_name, image_urls, sync_progress)
-            # Upload progress
-            async def upload_progress(current, total):
-                await _progress_message(event, current, total, 'upload', msg)
-            await event.client.send_file(event.chat_id, file=zip_file_path, caption=f"✅ Arsip `.zip` dari board **'{board_name}'**.", reply_to=reply_to_id, progress_callback=upload_progress)
-            os.remove(zip_file_path)
+            try:
+                loop = asyncio.get_event_loop()
+                zip_file_path = await loop.run_in_executor(None, _run_zip_process, board_name, image_urls, sync_progress)
+                
+                if zip_file_path and os.path.exists(zip_file_path):
+                    # Upload progress
+                    async def upload_progress(current, total):
+                        await _progress_message(event, current, total, 'upload', msg)
+                    
+                    await event.client.send_file(
+                        event.chat_id, 
+                        file=zip_file_path, 
+                        caption=f"✅ Arsip `.zip` dari board **'{board_name}'** ({total_images} gambar).",
+                        reply_to=reply_to_id or event.message.id,
+                        progress_callback=upload_progress
+                    )
+                    os.remove(zip_file_path)
+                    logger.info(f"ZIP file sent and removed: {zip_file_path}")
+                else:
+                    await event.reply("❌ Gagal membuat file ZIP.")
+                    
+            except Exception as e:
+                logger.error(f"Error in ZIP mode: {e}")
+                await event.reply(f"❌ Gagal membuat ZIP: {str(e)}")
         elif mode == 'album':
             temp_dir, downloaded_paths = await _download_for_album(board_name, image_urls, async_progress)
             if not downloaded_paths: return await event.edit("Gagal mengunduh gambar.")
@@ -713,10 +774,25 @@ async def process_pboard_callback(event):
             await msg.edit(f"Downloading board {i}/{len(link_list)}: **{board_name}** ({total_images} pins)")
 
             if mode == 'zip':
-                loop = asyncio.get_event_loop()
-                zip_file_path = await loop.run_in_executor(None, _run_zip_process, board_name, image_urls)
-                await event.client.send_file(event.chat_id, file=zip_file_path, caption=f"✅ ZIP archive of board **'{board_name}'**.", reply_to=original_cmd_msg.id)
-                os.remove(zip_file_path)
+                try:
+                    loop = asyncio.get_event_loop()
+                    zip_file_path = await loop.run_in_executor(None, _run_zip_process, board_name, image_urls)
+                    
+                    if zip_file_path and os.path.exists(zip_file_path):
+                        await event.client.send_file(
+                            event.chat_id, 
+                            file=zip_file_path, 
+                            caption=f"✅ ZIP archive of board **'{board_name}'** ({total_images} images).",
+                            reply_to=original_cmd_msg.id
+                        )
+                        os.remove(zip_file_path)
+                        logger.info(f"ZIP file sent and removed in callback: {zip_file_path}")
+                    else:
+                        await event.reply(f"❌ Failed to create ZIP for board **{board_name}**")
+                        
+                except Exception as e:
+                    logger.error(f"Error creating ZIP in callback: {e}")
+                    await event.reply(f"❌ Error creating ZIP for board **{board_name}**: {str(e)}")
             else: # album mode
                 temp_dir, downloaded_paths = await _download_for_album(board_name, image_urls)
                 if not downloaded_paths:
