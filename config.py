@@ -3,6 +3,8 @@ Configuration file for Pinfairybot
 Contains all configurable settings and constants
 """
 
+import os
+
 # Bot Configuration
 DEFAULT_DAILY_QUOTA = 100
 RATE_LIMIT_SECONDS = 3
@@ -58,7 +60,7 @@ SUCCESS_MESSAGES = {
 }
 
 # Admin settings
-ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(',') if admin_id]
+ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(',') if admin_id.strip().isdigit()]
 
 # Pinterest API Settings
 PINTEREST_HEADERS = {

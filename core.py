@@ -1,4 +1,17 @@
-import logging, os, glob, time, sqlite3, zipfile, shutil, asyncio, httpx, re, psutil, platform, math, json
+import logging
+import os
+import glob
+import time
+import sqlite3
+import zipfile
+import shutil
+import asyncio
+import httpx
+import re
+import psutil
+import platform
+import math
+import json
 from datetime import datetime
 from telethon import events
 from telethon.tl.custom import Button
@@ -6,8 +19,11 @@ from telethon.utils import get_display_name
 from modules.pinterest import get_pinterest_photo_data, get_pinterest_video_data, get_all_pins_with_pagination, search_pins
 
 logger = logging.getLogger(__name__)
-DB_FILE = "bot_stats.db"; FORCE_SUB_CHANNEL = os.getenv("FORCE_SUB_CHANNEL", "@aes_hub"); DOWNLOADS_DIR = "downloads"
-URL_PATTERN = re.compile(r'https?://[^\s]+'); BOT_START_TIME = datetime.utcnow()
+DB_FILE = "bot_stats.db"
+FORCE_SUB_CHANNEL = os.getenv("FORCE_SUB_CHANNEL", "@aes_hub")
+DOWNLOADS_DIR = "downloads"
+URL_PATTERN = re.compile(r'https?://[^\s]+')
+BOT_START_TIME = datetime.utcnow()
 
 # Rate limiting storage
 user_last_request = {}
@@ -16,7 +32,7 @@ RATE_LIMIT_SECONDS = 3  # Minimum 3 seconds between requests per user
 def validate_pinterest_url(url: str) -> dict:
     """Validate if URL is a valid Pinterest URL."""
     if not url or not isinstance(url, str):
-        return {"is_valid": False, "message": "URL tidak valid."}
+        return {"is_valid": False, "message": "URL tidak valid.", "is_dead": False}
     
     # Clean URL
     url = url.strip()
@@ -44,7 +60,7 @@ def validate_pinterest_url(url: str) -> dict:
         logger.warning(f"Gagal memeriksa link {url}: {e}")
         return {"is_valid": False, "message": "Gagal memeriksa link.", "is_dead": True}
     
-    return {"is_valid": True, "url": url}
+    return {"is_valid": True, "url": url, "is_dead": False}
 
 def check_rate_limit(user_id: int) -> dict:
     """Check if user is rate limited."""
@@ -534,10 +550,14 @@ async def process_search_command(event, query: str):
 async def process_pinterest_board(event, url: str, mode: str):
     try:
         board_data = await get_all_pins_with_pagination(url)
-        if not board_data.get("is_success"): return await event.edit(f"⚠️ {board_data.get('message')}")
-        image_urls = board_data.get("image_urls"); board_name = url.strip("/").split("/")[-1]; total_images = len(image_urls)
+        if not board_data.get("is_success"): 
+            return await event.edit(f"⚠️ {board_data.get('message')}")
+        image_urls = board_data.get("image_urls")
+        board_name = url.strip("/").split("/")[-1]
+        total_images = len(image_urls)
         msg = await event.edit(f"✅ Ditemukan **{total_images}** pin unik.\nMulai mengunduh untuk mode **{mode.upper()}**...")
-        original_message = await event.get_message(); reply_to_id = original_message.reply_to.reply_to_msg_id
+        original_message = await event.get_message()
+        reply_to_id = original_message.reply_to.reply_to_msg_id if original_message.reply_to else None
         # Progress callback for download
         async def async_progress(current, total, stage):
             await _progress_message(event, current, total, stage, msg)
@@ -952,11 +972,20 @@ Selamat mencoba! ✨
         await process_start_command(event)
 
 async def clean_temp_files(folder=DOWNLOADS_DIR, max_age_hours=1):
-    if not os.path.isdir(folder): os.makedirs(folder, exist_ok=True); return
-    now = time.time(); max_age_seconds = max_age_hours * 3600
+    """Clean temporary files older than specified hours."""
+    if not os.path.isdir(folder):
+        os.makedirs(folder, exist_ok=True)
+        return
+    
+    now = time.time()
+    max_age_seconds = max_age_hours * 3600
+    
     for f in glob.glob(os.path.join(folder, '*')):
         try:
             if now - os.path.getmtime(f) > max_age_seconds:
-                if os.path.isdir(f): shutil.rmtree(f)
-                else: os.remove(f)
-        except Exception as e: logger.error(f"Gagal menghapus item {f}: {e}")
+                if os.path.isdir(f):
+                    shutil.rmtree(f)
+                else:
+                    os.remove(f)
+        except Exception as e:
+            logger.error(f"Gagal menghapus item {f}: {e}")
