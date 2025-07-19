@@ -658,13 +658,13 @@ Saya adalah asisten pribadimu untuk mengunduh semua media dari **Pinterest** den
 - **Kualitas Tinggi:** Selalu memberikan gambar dan video dengan resolusi terbaik.
 - **Download Board:** Unduh seluruh pin dari board favoritmu dalam sekejap.
 
-Silakan jelajahi fitur lainnya melalui tombol di bawah ini!
+Gunakan tombol di bawah untuk bantuan!
 """
     
     buttons = [
         [
             Button.inline("🚀 Panduan Cepat", data="quick_guide"),
-            Button.inline("📋 Daftar Perintah", data="full_help")
+            Button.inline("🔙 Kembali", data="back_to_start")
         ],
         [
             Button.url("📣 Channel Update", f"https://t.me/{FORCE_SUB_CHANNEL.lstrip('@')}"),
@@ -675,34 +675,28 @@ Silakan jelajahi fitur lainnya melalui tombol di bawah ini!
     await event.respond(start_text, buttons=buttons)
 async def process_help_command(event):
     from telethon.tl.custom import Button
-    help_text = """**🧚 Bantuan Perintah Pinfairy Bot**
+    help_text = """**🧚 Pinfairy Bot - Panduan**
 
-**📥 Download Commands:**
-`.p <link>` - Download foto Pinterest
-`.pv <link>` - Download video Pinterest  
-`.pboard <link>` - Download semua foto dari board
-`.search <query>` - Cari dan download pin
+**📥 Download:**
+`.p <link>` - Foto Pinterest
+`.pv <link>` - Video Pinterest  
+`.pboard <link>` - Semua foto dari board
+`.search <query>` - Cari pin
 
-**👤 User Commands:**
-`.profile` - Lihat profil dan statistik
+**👤 User:**
+`.profile` - Profil & statistik
 `.history` - Riwayat download
-`.quota` - Cek sisa quota harian
-`.config` - Pengaturan bot
-`.leaderboard` - Lihat papan peringkat downloader
-`.feedback` - Kirim feedback atau request fitur
+`.quota` - Sisa quota
+`.config` - Pengaturan
 
-**ℹ️ Info Commands:**
-`.alive` - Status bot dan sistem
-`.stats` - Statistik global bot
-`.help` - Bantuan ini
+**ℹ️ Info:**
+`.alive` - Status bot
+`.stats` - Statistik bot
+`.help` - Bantuan
 
-
-**💡 Tips:**
-• **Auto-Detect:** Cukup kirim link Pinterest di chat, bot akan otomatis merespon!
-• **Quota Harian:** 100 download/hari
-• Konfigurasi bahasa, notifikasi, dan kualitas di `.config`"""
+**💡 Tips:** Kirim link Pinterest langsung untuk auto-download!"""
     
-    await event.respond(help_text, buttons=[Button.inline("🗑️ Tutup", data="close_help")])
+    await event.respond(help_text)
 async def process_stats_command(event):
     from telethon.tl.custom import Button
     stats = get_stats()
