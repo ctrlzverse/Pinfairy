@@ -723,6 +723,10 @@ async def _send_media_with_buttons(event, data, media_type):
     else:
         reply_to_msg = event.message
 
+    # Log successful download and update quota
+    user_id = event.sender_id
+    log_download(user_id, media_type, data.get("post_url", ""), True)
+    
     sent_message = await event.client.send_file(
         event.chat_id,
         file=data.get("media_url"),
@@ -739,14 +743,34 @@ async def _send_media_with_buttons(event, data, media_type):
     )
 
 async def process_pinterest_photo(event, url: str):
-    msg = await event.reply("⏳ Mencari foto..."); data = await get_pinterest_photo_data(url)
-    if not data.get("is_success"): return await msg.edit(f"⚠️ {data.get('message')}")
-    await msg.delete(); await _send_media_with_buttons(event, data, "photo")
+    msg = await event.reply("⏳ Mencari foto...")
+    data = await get_pinterest_photo_data(url)
+    if not data.get("is_success"): 
+        return await msg.edit(f"⚠️ {data.get('message')}")
+    
+    # Log download and update quota
+    user_id = event.sender_id
+    username = event.sender.username or event.sender.first_name
+    update_user_activity(user_id, username)
+    log_download(user_id, "photo", url, True)
+    
+    await msg.delete()
+    await _send_media_with_buttons(event, data, "photo")
 
 async def process_pinterest_video(event, url: str):
-    msg = await event.reply("⏳ Mencari video..."); data = await get_pinterest_video_data(url)
-    if not data.get("is_success"): return await msg.edit(f"⚠️ {data.get('message')}")
-    await msg.delete(); await _send_media_with_buttons(event, data, "video")
+    msg = await event.reply("⏳ Mencari video...")
+    data = await get_pinterest_video_data(url)
+    if not data.get("is_success"): 
+        return await msg.edit(f"⚠️ {data.get('message')}")
+    
+    # Log download and update quota
+    user_id = event.sender_id
+    username = event.sender.username or event.sender.first_name
+    update_user_activity(user_id, username)
+    log_download(user_id, "video", url, True)
+    
+    await msg.delete()
+    await _send_media_with_buttons(event, data, "video")
 async def process_pboard_callback(event):
     try:
         mode = event.data.decode().split('_')[1]
