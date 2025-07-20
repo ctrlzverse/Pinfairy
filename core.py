@@ -644,9 +644,12 @@ async def process_pinterest_board(event, url: str, mode: str):
             shutil.rmtree(temp_dir)
         increment_stat("board"); increment_stat("photo", total_images); await msg.edit("✅ Selesai!")
     except Exception as e: logger.error(f"Error di process_pinterest_board: {e}", exc_info=True); await event.edit(f"❌ Terjadi kesalahan fatal.")
+from config import BOT_PREFIX
+
 async def process_start_command(event):
     from telethon.tl.custom import Button
     user_name = get_display_name(event.sender)
+    prefix = BOT_PREFIX
     
     start_text = f"""
 👋 **Halo, {user_name}! Selamat datang di Pinfairy Bot!** 🧚
@@ -663,12 +666,11 @@ Gunakan tombol di bawah untuk bantuan!
     
     buttons = [
         [
-            Button.inline("🚀 Panduan Cepat", data="quick_guide"),
-            Button.inline("🔙 Kembali", data="back_to_start")
+            Button.inline("🚀 Panduan Cepat", data="quick_guide")
         ],
         [
             Button.url("📣 Channel Update", f"https://t.me/{FORCE_SUB_CHANNEL.lstrip('@')}"),
-            Button.url("💻 Source Code", "https://github.com/aes-co/PinfairyBot")
+            Button.url("💻 Source Code", "https://github.com/ctrlzverse/PinfairyBot")
         ]
     ]
     
