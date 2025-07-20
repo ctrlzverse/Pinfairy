@@ -39,7 +39,9 @@ async def get_all_pins_with_pagination(board_url: str) -> dict:
     all_image_urls = {}  # Dictionary untuk menyimpan URL dengan resolusi tertinggi
     PINTEREST_API_ENDPOINT = "https://www.pinterest.com/resource/BoardFeedResource/get/"
     
-    def get_image_resolution(url: str) -> tuple:
+    MIN_RESOLUTION = 200 * 200  # Minimum resolution threshold to filter low-quality images
+    
+    def get_image_resolution(url: str) -> int:
         """Extract resolution from Pinterest URL."""
         match = re.search(r'/(\d+)x(\d+)/', url)
         if match:
@@ -73,11 +75,14 @@ async def get_all_pins_with_pagination(board_url: str) -> dict:
                 if url.endswith(('.jpg', '.jpeg', '.png')):
                     # Convert to original resolution
                     orig_url = get_original_url(url)
+                    resolution = get_image_resolution(orig_url)
+                    if resolution < MIN_RESOLUTION:
+                        continue  # Skip low-quality images
                     
                     # Check for duplicates
                     is_duplicate = False
                     for existing_url in list(all_image_urls.keys()):
-                        if is_duplicate_image(url, existing_url):
+                        if is_duplicate_image(orig_url, existing_url):
                             is_duplicate = True
                             break
                     
@@ -99,7 +104,7 @@ async def get_all_pins_with_pagination(board_url: str) -> dict:
                     await page.goto(board_url, wait_until="domcontentloaded", timeout=60000)
                     
                     # Scroll down multiple times to load all pins
-                    for _ in range(5):
+                    for _ in range(10):
                         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                         await page.wait_for_timeout(2000)  # Wait for content to load
                     
@@ -110,14 +115,17 @@ async def get_all_pins_with_pagination(board_url: str) -> dict:
                     found_urls = re.findall(r'https://i\.pinimg\.com/[^\s"\']+', html_content)
                     logger.debug(f"[Pinterest] Playwright menemukan {len(found_urls)} gambar di board.")
                     
-                    # Process Playwright URLs with deduplication
+                    # Process Playwright URLs with deduplication and filtering
                     processed_urls = {}
                     for url in found_urls:
                         if url.endswith(('.jpg', '.jpeg', '.png')):
                             orig_url = get_original_url(url)
+                            resolution = get_image_resolution(orig_url)
+                            if resolution < MIN_RESOLUTION:
+                                continue  # Skip low-quality images
                             is_duplicate = False
                             for existing_url in list(processed_urls.keys()):
-                                if is_duplicate_image(url, existing_url):
+                                if is_duplicate_image(orig_url, existing_url):
                                     is_duplicate = True
                                     break
                             if not is_duplicate:
@@ -134,10 +142,10 @@ async def get_all_pins_with_pagination(board_url: str) -> dict:
             board_id = board_id_match.group(1)
             bookmark = bookmark_match.group(1)
             
-            # API pagination with deduplication
+            # API pagination with deduplication and increased page size
             while bookmark and bookmark != '-end-':
                 await asyncio.sleep(1)
-                payload = {"options": {"board_id": board_id, "page_size": 25, "bookmarks": [bookmark]}}
+                payload = {"options": {"board_id": board_id, "page_size": 50, "bookmarks": [bookmark]}}
                 api_response = await client.get(PINTEREST_API_ENDPOINT, params={'source_url': board_url, 'data': json.dumps(payload)})
                 
                 if api_response.status_code != 200:
@@ -161,6 +169,8 @@ async def get_all_pins_with_pagination(board_url: str) -> dict:
                         
                         if best_url:
                             orig_url = get_original_url(best_url)
+                            if get_image_resolution(orig_url) < MIN_RESOLUTION:
+                                continue  # Skip low-quality images
                             
                             # Check for duplicates
                             is_duplicate = False
