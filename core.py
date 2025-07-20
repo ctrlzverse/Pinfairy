@@ -1108,7 +1108,40 @@ Selamat mencoba! ✨
         await process_help_command(event)
     
     elif button_data == "back_to_start":
-        await process_start_command(event)
+        # Instead of sending a new message, edit the current message to show the start message
+        start_text, buttons = await get_start_message(event)
+        await event.edit(start_text, buttons=buttons)
+        
+async def get_start_message(event):
+    from telethon.tl.custom import Button
+    user_name = get_display_name(event.sender)
+    prefix = BOT_PREFIX
+    
+    start_text = f"""
+👋 **Halo, {user_name}! Selamat datang di Pinfairy Bot!** 🧚
+
+Saya adalah asisten pribadimu untuk mengunduh semua media dari **Pinterest** dengan cepat dan mudah.
+
+**✨ Fitur Andalan:**
+- **Auto-Detect:** Cukup kirim link Pinterest di chat, saya akan langsung merespon!
+- **Kualitas Tinggi:** Selalu memberikan gambar dan video dengan resolusi terbaik.
+- **Download Board:** Unduh seluruh pin dari board favoritmu dalam sekejap.
+
+Gunakan tombol di bawah untuk bantuan!
+"""
+    
+    buttons = [
+        [
+            Button.inline("🚀 Panduan Cepat", data="quick_guide")
+        ],
+        [
+            Button.url("📣 Channel Update", f"https://t.me/{FORCE_SUB_CHANNEL.lstrip('@')}"),
+            Button.url("💻 Source Code", "https://github.com/ctrlzverse/PinfairyBot")
+        ]
+    ]
+    
+    # Return text and buttons as separate arguments for edit
+    return start_text, buttons
 
 async def clean_temp_files(folder=DOWNLOADS_DIR, max_age_hours=1):
     """Clean temporary files older than specified hours."""
