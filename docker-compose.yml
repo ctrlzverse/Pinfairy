@@ -1,0 +1,91 @@
+version: '3.8'
+
+services:
+  pinfairy-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.enhanced
+    container_name: pinfairy-bot
+    restart: unless-stopped
+    environment:
+      - API_ID=${API_ID}
+      - API_HASH=${API_HASH}
+      - BOT_TOKEN=${BOT_TOKEN}
+      - BOT_PREFIX=${BOT_PREFIX:-/}
+      - ADMIN_IDS=${ADMIN_IDS}
+      - FORCE_SUB_CHANNEL=${FORCE_SUB_CHANNEL:-@aes_hub}
+      - BROWSERLESS_TOKEN=${BROWSERLESS_TOKEN}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DATABASE_URL=sqlite:///data/bot_stats.db
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./downloads:/app/downloads
+      - ./backups:/app/backups
+    depends_on:
+      - redis
+    networks:
+      - pinfairy-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import asyncio; from services.monitoring import get_health_status; print(asyncio.run(get_health_status()))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    container_name: pinfairy-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - pinfairy-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Optional: Monitoring with Prometheus and Grafana
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: pinfairy-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    networks:
+      - pinfairy-network
+    profiles:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: pinfairy-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - pinfairy-network
+    profiles:
+      - monitoring
+
+volumes:
+  redis-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  pinfairy-network:
+    driver: bridge

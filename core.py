@@ -1,287 +1,82 @@
-import logging
-import os
-import glob
-import time
-import sqlite3
-import zipfile
-import shutil
+"""
+Refactored core module for Pinfairy Bot
+This module now serves as a bridge between the old interface and new service-based architecture
+"""
+
 import asyncio
-import httpx
-import re
-import psutil
-import platform
-import math
-import json
+import time
 from datetime import datetime
+from typing import Dict, List, Optional, Any
 from telethon import events
 from telethon.tl.custom import Button
 from telethon.utils import get_display_name
-from modules.pinterest import get_pinterest_photo_data, get_pinterest_video_data, get_all_pins_with_pagination, search_pins
 
-logger = logging.getLogger(__name__)
-DB_FILE = "bot_stats.db"
-FORCE_SUB_CHANNEL = os.getenv("FORCE_SUB_CHANNEL", "@aes_hub")
-DOWNLOADS_DIR = "downloads"
-URL_PATTERN = re.compile(r'https?://[^\s]+')
+# Import new services
+from services.database import db_service
+from services.pinterest import pinterest_service
+from services.user_management import user_service
+from services.media_processing import media_processor
+from services.monitoring import monitoring_service
+from services.config_manager import get_config
+from utils.logger import get_logger
+from utils.validators import validate_pinterest_url
+from exceptions import (
+    PinfairyException, RateLimitException, QuotaExceededException,
+    InvalidURLException, DeadLinkException
+)
+from constants import DOWNLOADS_DIR, BOT_START_TIME
+
+logger = get_logger(__name__)
+
+# Global state
 BOT_START_TIME = datetime.utcnow()
 
-# Rate limiting storage
-user_last_request = {}
-RATE_LIMIT_SECONDS = 3  # Minimum 3 seconds between requests per user
+# Wrapper functions for backward compatibility
+async def validate_pinterest_url_async(url: str) -> Dict[str, Any]:
+    """Async wrapper for Pinterest URL validation"""
+    return await validate_pinterest_url(url)
 
-def validate_pinterest_url(url: str) -> dict:
-    """Validate if URL is a valid Pinterest URL."""
-    if not url or not isinstance(url, str):
-        return {"is_valid": False, "message": "URL tidak valid.", "is_dead": False}
-    
-    # Clean URL
-    url = url.strip()
-    
-    # Check if it's a valid URL format
-    if not re.match(r'^https?://', url):
-        return {"is_valid": False, "message": "URL harus dimulai dengan http:// atau https://", "is_dead": False}
-    
-    # Check if it's Pinterest domain
-    pinterest_domains = ['pinterest.com', 'pin.it', 'www.pinterest.com']
-    if not any(domain in url for domain in pinterest_domains):
-        return {"is_valid": False, "message": "URL harus dari domain Pinterest (pinterest.com atau pin.it)", "is_dead": False}
-    
-    # Check URL length (prevent extremely long URLs)
-    if len(url) > 2000:
-        return {"is_valid": False, "message": "URL terlalu panjang.", "is_dead": False}
+def check_rate_limit(user_id: int) -> Dict[str, Any]:
+    """Check if user is rate limited"""
+    return user_service.check_rate_limit(user_id)
 
-    # Check if link is alive
-    try:
-        with httpx.Client() as client:
-            r = client.head(url, follow_redirects=True, timeout=10.0)
-            if r.status_code != 200:
-                return {"is_valid": False, "message": "Link tidak valid atau sudah mati.", "is_dead": True}
-    except Exception as e:
-        logger.warning(f"Gagal memeriksa link {url}: {e}")
-        return {"is_valid": False, "message": "Gagal memeriksa link.", "is_dead": True}
-    
-    return {"is_valid": True, "url": url, "is_dead": False}
+# Database initialization wrapper
+async def init_db():
+    """Initialize database using new service"""
+    await db_service.initialize()
 
-def check_rate_limit(user_id: int) -> dict:
-    """Check if user is rate limited."""
-    current_time = time.time()
-    
-    if user_id in user_last_request:
-        time_diff = current_time - user_last_request[user_id]
-        if time_diff < RATE_LIMIT_SECONDS:
-            remaining = RATE_LIMIT_SECONDS - time_diff
-            return {
-                "allowed": False, 
-                "message": f"⏳ Tunggu {remaining:.1f} detik sebelum request berikutnya."
-            }
-    
-    user_last_request[user_id] = current_time
-    return {"allowed": True}
+# Statistics wrapper functions
+async def get_stats() -> Dict[str, int]:
+    """Get global download statistics"""
+    return await db_service.get_global_stats()
 
-# Database constants
-DEFAULT_DAILY_QUOTA = 100
-DEFAULT_SETTINGS = {
-    "language": "id",
-    "notifications": True,
-    "download_quality": "high"
-}
+# User management wrapper functions
+async def get_user_profile(user_id: int) -> Optional[Dict[str, Any]]:
+    """Get user profile"""
+    return await user_service.get_user_profile(user_id)
 
-def init_db():
-    """Initialize database with all required tables."""
-    with sqlite3.connect(DB_FILE) as con:
-        cur = con.cursor()
-        
-        # Download stats table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS download_stats (
-                media_type TEXT PRIMARY KEY,
-                count INTEGER NOT NULL DEFAULT 0
-            )
-        """)
-        cur.execute("INSERT OR IGNORE INTO download_stats (media_type, count) VALUES ('photo', 0)")
-        cur.execute("INSERT OR IGNORE INTO download_stats (media_type, count) VALUES ('video', 0)")
-        cur.execute("INSERT OR IGNORE INTO download_stats (media_type, count) VALUES ('board', 0)")
-        
-        # Users table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                daily_quota INTEGER DEFAULT 100,
-                downloads_today INTEGER DEFAULT 0,
-                total_downloads INTEGER DEFAULT 0,
-                quota_reset_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                settings TEXT DEFAULT '{"language": "id", "notifications": true, "download_quality": "high"}'
-            );
-        """)
-        
-        # Download history table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS download_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                media_type TEXT,
-                url TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                success BOOLEAN,
-                error_message TEXT,
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
-            )
-        """)
-        
-        # Performance metrics table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS performance_metrics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                cpu_usage REAL,
-                memory_usage REAL,
-                disk_usage REAL,
-                response_time REAL,
-                error_count INTEGER DEFAULT 0
-            )
-        """)
-        
-        con.commit()
+async def update_user_activity(user_id: int, username: str = None, **kwargs):
+    """Update user activity"""
+    await user_service.create_or_update_user(user_id, username, **kwargs)
 
-def increment_stat(media_type: str, amount: int = 1):
-    """Increment download statistics."""
-    with sqlite3.connect(DB_FILE) as con:
-        con.cursor().execute(
-            "UPDATE download_stats SET count = count + ? WHERE media_type = ?",
-            (amount, media_type)
-        )
-        con.commit()
+# Download logging wrapper functions
+async def log_download(user_id: int, media_type: str, url: str, success: bool, **kwargs):
+    """Log download attempt"""
+    return await user_service.log_user_download(user_id, media_type, url, success, **kwargs)
 
-def get_stats():
-    """Get global download statistics."""
-    with sqlite3.connect(DB_FILE) as con:
-        cur = con.cursor()
-        cur.execute("SELECT media_type, count FROM download_stats")
-        return {row[0]: row[1] for row in cur.fetchall()}
+async def get_download_history(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+    """Get user's download history"""
+    return await user_service.get_user_download_history(user_id, limit)
 
-def get_user_profile(user_id: int) -> dict:
-    """Get user profile and statistics."""
-    with sqlite3.connect(DB_FILE) as con:
-        cur = con.cursor()
-        cur.execute("""
-            SELECT username, first_seen, last_active, daily_quota, 
-                   downloads_today, total_downloads, quota_reset_at, settings
-            FROM users WHERE user_id = ?
-        """, (user_id,))
-        row = cur.fetchone()
-        if not row:
-            return None
-        return {
-            "username": row[0],
-            "first_seen": row[1],
-            "last_active": row[2],
-            "daily_quota": row[3],
-            "downloads_today": row[4],
-            "total_downloads": row[5],
-            "quota_reset_at": row[6],
-            "settings": json.loads(row[7])
-        }
-
-def update_user_activity(user_id: int, username: str = None):
-    """Update user's last active time and create if not exists."""
-    with sqlite3.connect(DB_FILE) as con:
-        cur = con.cursor()
-        cur.execute("""
-            INSERT INTO users (user_id, username, last_active)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(user_id) DO UPDATE SET
-                last_active = CURRENT_TIMESTAMP,
-                username = COALESCE(?, username)
-        """, (user_id, username, username))
-        con.commit()
-
-def log_download(user_id: int, media_type: str, url: str, success: bool, error_message: str = None):
-    """Log download attempt to history."""
-    with sqlite3.connect(DB_FILE) as con:
-        cur = con.cursor()
-        cur.execute("""
-            INSERT INTO download_history 
-            (user_id, media_type, url, success, error_message)
-            VALUES (?, ?, ?, ?, ?)
-        """, (user_id, media_type, url, success, error_message))
-        if success:
-            cur.execute("""
-                UPDATE users SET 
-                downloads_today = downloads_today + 1,
-                total_downloads = total_downloads + 1
-                WHERE user_id = ?
-            """, (user_id,))
-        con.commit()
-
-def get_download_history(user_id: int, limit: int = 10) -> list:
-    """Get user's download history."""
-    with sqlite3.connect(DB_FILE) as con:
-        cur = con.cursor()
-        cur.execute("""
-            SELECT media_type, url, timestamp, success, error_message
-            FROM download_history
-            WHERE user_id = ?
-            ORDER BY timestamp DESC
-            LIMIT ?
-        """, (user_id, limit))
-        return [
-            {
-                "media_type": row[0],
-                "url": row[1],
-                "timestamp": row[2],
-                "success": row[3],
-                "error_message": row[4]
-            }
-            for row in cur.fetchall()
-        ]
-
+# Performance and quota wrapper functions
 def log_performance_metric():
-    """Log current system performance metrics."""
-    try:
-        cpu = psutil.cpu_percent(interval=1)
-        mem = psutil.virtual_memory()
-        disk = psutil.disk_usage('/')
-        with sqlite3.connect(DB_FILE) as con:
-            con.execute("""
-                INSERT INTO performance_metrics 
-                (cpu_usage, memory_usage, disk_usage)
-                VALUES (?, ?, ?)
-            """, (cpu, mem.percent, disk.percent))
-            con.commit()
-    except Exception as e:
-        logger.error(f"Failed to log performance metrics: {e}")
+    """Log performance metrics using monitoring service"""
+    # This is now handled by the monitoring service automatically
+    pass
 
-def check_user_quota(user_id: int) -> dict:
-    """Check if user has remaining quota for today."""
-    profile = get_user_profile(user_id)
-    if not profile:
-        return {"allowed": True, "remaining": DEFAULT_DAILY_QUOTA}
-    
-    # Check if quota needs reset (daily reset)
-    quota_reset = datetime.fromisoformat(profile["quota_reset_at"])
-    now = datetime.utcnow()
-    
-    if now.date() > quota_reset.date():
-        # Reset daily quota
-        with sqlite3.connect(DB_FILE) as con:
-            con.execute("""
-                UPDATE users SET 
-                downloads_today = 0,
-                quota_reset_at = CURRENT_TIMESTAMP
-                WHERE user_id = ?
-            """, (user_id,))
-            con.commit()
-        profile["downloads_today"] = 0
-    
-    remaining = profile["daily_quota"] - profile["downloads_today"]
-    return {
-        "allowed": remaining > 0,
-        "remaining": remaining,
-        "quota": profile["daily_quota"]
-    }
+async def check_user_quota(user_id: int) -> Dict[str, Any]:
+    """Check user quota"""
+    return await user_service.check_user_quota(user_id)
 
 def get_user_settings(user_id: int) -> dict:
     """Get user's configuration settings."""
@@ -739,34 +534,86 @@ async def _send_media_with_buttons(event, data, media_type):
     )
 
 async def process_pinterest_photo(event, url: str):
-    msg = await event.reply("⏳ Mencari foto...")
-    data = await get_pinterest_photo_data(url)
-    if not data.get("is_success"): 
-        return await msg.edit(f"⚠️ {data.get('message')}")
-    
-    # Log download and update quota
+    """Process Pinterest photo download with enhanced error handling"""
+    start_time = time.time()
     user_id = event.sender_id
     username = event.sender.username or event.sender.first_name
-    update_user_activity(user_id, username)
-    log_download(user_id, "photo", url, True)
     
-    await msg.delete()
-    await _send_media_with_buttons(event, data, "photo")
+    msg = await event.reply("⏳ Mencari foto...")
+    
+    try:
+        # Update user activity
+        await update_user_activity(user_id, username)
+        
+        # Get photo data using new service
+        async with pinterest_service:
+            data = await pinterest_service.get_photo_data(url)
+        
+        if not data.get("is_success"):
+            await msg.edit(f"⚠️ {data.get('message')}")
+            return
+        
+        # Log successful download
+        duration = time.time() - start_time
+        await log_download(user_id, "photo", url, True, duration=duration)
+        
+        # Record metrics
+        monitoring_service.record_user_request(user_id, duration, True)
+        
+        await msg.delete()
+        await _send_media_with_buttons(event, data, "photo")
+        
+    except (RateLimitException, QuotaExceededException) as e:
+        await msg.edit(e.message)
+        monitoring_service.record_user_request(user_id, time.time() - start_time, False)
+    except Exception as e:
+        logger.error(f"Error processing photo: {str(e)}", exc_info=True, user_id=user_id, url=url)
+        await msg.edit("❌ Terjadi kesalahan saat memproses foto.")
+        
+        # Log failed download
+        await log_download(user_id, "photo", url, False, error_message=str(e))
+        monitoring_service.record_user_request(user_id, time.time() - start_time, False)
 
 async def process_pinterest_video(event, url: str):
-    msg = await event.reply("⏳ Mencari video...")
-    data = await get_pinterest_video_data(url)
-    if not data.get("is_success"): 
-        return await msg.edit(f"⚠️ {data.get('message')}")
-    
-    # Log download and update quota
+    """Process Pinterest video download with enhanced error handling"""
+    start_time = time.time()
     user_id = event.sender_id
     username = event.sender.username or event.sender.first_name
-    update_user_activity(user_id, username)
-    log_download(user_id, "video", url, True)
     
-    await msg.delete()
-    await _send_media_with_buttons(event, data, "video")
+    msg = await event.reply("⏳ Mencari video...")
+    
+    try:
+        # Update user activity
+        await update_user_activity(user_id, username)
+        
+        # Get video data using new service
+        async with pinterest_service:
+            data = await pinterest_service.get_video_data(url)
+        
+        if not data.get("is_success"):
+            await msg.edit(f"⚠️ {data.get('message')}")
+            return
+        
+        # Log successful download
+        duration = time.time() - start_time
+        await log_download(user_id, "video", url, True, duration=duration)
+        
+        # Record metrics
+        monitoring_service.record_user_request(user_id, duration, True)
+        
+        await msg.delete()
+        await _send_media_with_buttons(event, data, "video")
+        
+    except (RateLimitException, QuotaExceededException) as e:
+        await msg.edit(e.message)
+        monitoring_service.record_user_request(user_id, time.time() - start_time, False)
+    except Exception as e:
+        logger.error(f"Error processing video: {str(e)}", exc_info=True, user_id=user_id, url=url)
+        await msg.edit("❌ Terjadi kesalahan saat memproses video.")
+        
+        # Log failed download
+        await log_download(user_id, "video", url, False, error_message=str(e))
+        monitoring_service.record_user_request(user_id, time.time() - start_time, False)
 async def process_pboard_callback(event):
     try:
         mode = event.data.decode().split('_')[1]
@@ -1144,20 +991,5 @@ Gunakan tombol di bawah untuk bantuan!
     return start_text, buttons
 
 async def clean_temp_files(folder=DOWNLOADS_DIR, max_age_hours=1):
-    """Clean temporary files older than specified hours."""
-    if not os.path.isdir(folder):
-        os.makedirs(folder, exist_ok=True)
-        return
-    
-    now = time.time()
-    max_age_seconds = max_age_hours * 3600
-    
-    for f in glob.glob(os.path.join(folder, '*')):
-        try:
-            if now - os.path.getmtime(f) > max_age_seconds:
-                if os.path.isdir(f):
-                    shutil.rmtree(f)
-                else:
-                    os.remove(f)
-        except Exception as e:
-            logger.error(f"Gagal menghapus item {f}: {e}")
+    """Clean temporary files using media processor service"""
+    await media_processor.cleanup()
