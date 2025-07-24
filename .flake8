@@ -1,14 +1,20 @@
+# Pinfairy Bot - Flake8 Configuration
 [flake8]
 max-line-length = 88
 extend-ignore = E203, W503, E501
-exclude = 
+exclude =
     .git,
     __pycache__,
     venv,
     .venv,
+    .env,
     build,
     dist,
-    *.egg-info
+    *.egg-info,
+    .pytest_cache,
+    logs,
+    downloads,
+    backups
 per-file-ignores =
     __init__.py:F401
     tests/*:S101

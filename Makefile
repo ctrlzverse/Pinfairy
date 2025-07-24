@@ -82,20 +82,15 @@ clean:
 	rm -rf .coverage htmlcov/ .pytest_cache/ .mypy_cache/
 	@echo "✅ Cleanup complete!"
 
-# Run original bot
+# Run bot
 run:
-	@echo "🤖 Starting Pinfairy Bot (original)..."
+	@echo "🚀 Starting Pinfairy Bot..."
 	python3 bot.py
-
-# Run enhanced bot
-run-enhanced:
-	@echo "🚀 Starting Pinfairy Bot (enhanced)..."
-	python3 bot_enhanced.py
 
 # Build Docker image
 docker-build:
 	@echo "🐳 Building Docker image..."
-	docker build -f Dockerfile.enhanced -t pinfairy-bot:latest .
+	docker build -t pinfairy-bot:latest .
 
 # Run in Docker
 docker-run:
