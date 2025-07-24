@@ -1,6 +1,16 @@
-import logging
+"""
+Enhanced command handlers for Pinfairy Bot
+Provides optimized handlers with comprehensive error handling, validation, and performance monitoring
+"""
+
+import asyncio
+import time
 import re
+from typing import Optional, Dict, Any
+from functools import wraps
 from telethon.tl.custom import Button
+from telethon import events
+
 from core import (
     process_start_command,
     process_pinterest_photo,
@@ -24,8 +34,23 @@ from core import (
     process_restore_command,
     process_contributors_command
 )
+from exceptions import (
+    ErrorHandler, ErrorContext, RateLimitException,
+    ValidationException, QuotaExceededException
+)
+from utils.logger import get_logger
+from utils.validators import validate_pinterest_url as validate_url
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+error_handler = ErrorHandler(logger)
+
+# Performance tracking
+handler_stats = {
+    'total_calls': 0,
+    'total_time': 0.0,
+    'handler_times': {},
+    'error_count': 0
+}
 
 USAGE_MESSAGES = {
     "photo": "**Cara Penggunaan:**\n`.p <link_foto_pinterest>`\n\nContoh:\n`.p https://pin.it/abcd1234`",
@@ -34,49 +59,139 @@ USAGE_MESSAGES = {
     "search": "**Cara Penggunaan:**\n`.search <kata_kunci>`\n\nContoh:\n`.search wallpaper anime`"
 }
 
+def handler_wrapper(handler_name: str, require_url: bool = False, check_quota: bool = True):
+    """
+    Decorator for command handlers with comprehensive error handling and performance monitoring
+    """
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(event):
+            start_time = time.time()
+            context = ErrorContext(
+                user_id=event.sender_id,
+                username=event.sender.username,
+                command=handler_name,
+                timestamp=start_time
+            )
+
+            try:
+                # Update global stats
+                handler_stats['total_calls'] += 1
+
+                # Update user activity
+                try:
+                    username = event.sender.username or event.sender.first_name
+                    await update_user_activity(event.sender_id, username)
+                except Exception as e:
+                    logger.warning(f"Failed to update user activity: {e}")
+
+                # Rate limiting check
+                try:
+                    rate_limit_result = await check_rate_limit(event.sender_id)
+                    if not rate_limit_result['allowed']:
+                        raise RateLimitException(
+                            f"Rate limit exceeded for user {event.sender_id}",
+                            remaining_time=rate_limit_result.get('retry_after', 30),
+                            context=context
+                        )
+                except RateLimitException:
+                    raise
+                except Exception as e:
+                    logger.warning(f"Rate limit check failed: {e}")
+
+                # Quota check
+                if check_quota:
+                    try:
+                        quota_result = await check_user_quota(event.sender_id)
+                        if not quota_result['allowed']:
+                            raise QuotaExceededException(
+                                f"Quota exceeded for user {event.sender_id}",
+                                remaining_quota=quota_result.get('remaining', 0),
+                                reset_time=quota_result.get('reset_time'),
+                                context=context
+                            )
+                    except QuotaExceededException:
+                        raise
+                    except Exception as e:
+                        logger.warning(f"Quota check failed: {e}")
+
+                # URL validation if required
+                if require_url:
+                    url = None
+                    if hasattr(event, 'pattern_match') and event.pattern_match:
+                        url = event.pattern_match.group(1)
+
+                    if not url:
+                        raise ValidationException(
+                            "URL required but not provided",
+                            field="url",
+                            context=context
+                        )
+
+                    context.url = url
+
+                    # Validate Pinterest URL
+                    try:
+                        validation_result = await validate_url(url)
+                        if not validation_result.get('is_valid', False):
+                            raise ValidationException(
+                                f"Invalid Pinterest URL: {url}",
+                                field="url",
+                                context=context
+                            )
+                    except ValidationException:
+                        raise
+                    except Exception as e:
+                        logger.warning(f"URL validation failed: {e}")
+
+                # Execute the actual handler
+                result = await func(event)
+
+                # Update performance stats
+                execution_time = time.time() - start_time
+                handler_stats['total_time'] += execution_time
+                handler_stats['handler_times'][handler_name] = handler_stats['handler_times'].get(handler_name, 0) + execution_time
+
+                logger.debug(f"Handler {handler_name} completed in {execution_time:.3f}s")
+                return result
+
+            except Exception as e:
+                # Handle all exceptions
+                handler_stats['error_count'] += 1
+                execution_time = time.time() - start_time
+
+                logger.error(f"Handler {handler_name} failed after {execution_time:.3f}s: {str(e)}")
+
+                # Get user-friendly error message
+                user_message = error_handler.handle_exception(e, context)
+
+                # Send error message to user
+                try:
+                    await event.reply(user_message)
+                except Exception as reply_error:
+                    logger.error(f"Failed to send error message: {reply_error}")
+
+        return wrapper
+    return decorator
+
+@handler_wrapper("start", require_url=False, check_quota=False)
 async def handle_start(event):
-    try:
-        await process_start_command(event)
-    except Exception as e:
-        logger.error(f"Error di handle_start: {e}", exc_info=True)
+    """Handle /start command with enhanced error handling"""
+    await process_start_command(event)
 
+@handler_wrapper("pinterest_photo", require_url=True, check_quota=True)
 async def handle_pinterest_photo(event):
+    """Handle Pinterest photo download with comprehensive validation"""
+    url = event.pattern_match.group(1).strip()
+
+    # Process the photo download
+    await process_pinterest_photo(event, url)
+
+    # Log successful download
     try:
-        # Update user activity
-        username = event.sender.username or event.sender.first_name
-        update_user_activity(event.sender_id, username)
-        
-        # Check if URL is provided
-        if not event.pattern_match.group(1):
-            return await event.edit(USAGE_MESSAGES["photo"], buttons=[Button.inline("🗑️ Tutup", data="close_help")])
-            
-        # Check quota
-        quota_check = check_user_quota(event.sender_id)
-        if not quota_check["allowed"]:
-            return await event.edit(f"⚠️ Quota harian Anda sudah habis. Sisa: {quota_check['remaining']}", buttons=[Button.inline("🗑️ Tutup", data="close_help")])
-            
-        # Check rate limit
-        rate_check = check_rate_limit(event.sender_id)
-        if not rate_check["allowed"]:
-            return await event.edit(rate_check["message"], buttons=[Button.inline("🗑️ Tutup", data="close_help")])
-
-        # Get and validate URL
-        url = event.pattern_match.group(1)
-        validation = validate_pinterest_url(url)
-        if not validation["is_valid"]:
-            log_download(event.sender_id, "photo", url, False, validation["message"])
-            return await event.edit(validation["message"], buttons=[Button.inline("🗑️ Tutup", data="close_help")])
-
-        try:
-            await process_pinterest_photo(event, validation["url"])
-            log_download(event.sender_id, "photo", validation["url"], True)
-        except Exception as download_error:
-            log_download(event.sender_id, "photo", validation["url"], False, str(download_error))
-            raise download_error
-            
+        await log_download(event.sender_id, url, "photo")
     except Exception as e:
-        logger.error(f"Error di handle_pinterest_photo: {e}", exc_info=True)
-        await event.edit("❌ Terjadi kesalahan saat memproses foto.", buttons=[Button.inline("🗑️ Tutup", data="close_help")])
+        logger.warning(f"Failed to log download: {e}")
 
 async def handle_pinterest_video(event):
     try:

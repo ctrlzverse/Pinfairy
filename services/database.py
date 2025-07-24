@@ -8,83 +8,211 @@ import aiosqlite
 import asyncio
 import json
 import os
+import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Union
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from constants import DB_FILE, DB_SCHEMA_VERSION, DEFAULT_USER_SETTINGS, DEFAULT_DAILY_QUOTA
 from exceptions import DatabaseException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+@dataclass
+class QueryResult:
+    """Structured query result with metadata"""
+    data: Any
+    execution_time: float
+    rows_affected: int = 0
+
+class ConnectionPool:
+    """Optimized connection pool with health checks"""
+
+    def __init__(self, db_path: str, pool_size: int = 5):
+        self.db_path = db_path
+        self.pool_size = pool_size
+        self._pool = []
+        self._lock = asyncio.Lock()
+        self._created_connections = 0
+
+    async def get_connection(self) -> aiosqlite.Connection:
+        """Get connection from pool with health check"""
+        async with self._lock:
+            if self._pool:
+                conn = self._pool.pop()
+                # Health check
+                try:
+                    await conn.execute("SELECT 1")
+                    return conn
+                except Exception:
+                    await conn.close()
+                    # Fall through to create new connection
+
+            # Create new connection
+            if self._created_connections < self.pool_size * 2:  # Allow some overflow
+                conn = await self._create_connection()
+                self._created_connections += 1
+                return conn
+            else:
+                # Wait for connection to be returned
+                await asyncio.sleep(0.1)
+                return await self.get_connection()
+
+    async def return_connection(self, conn: aiosqlite.Connection):
+        """Return connection to pool"""
+        async with self._lock:
+            if len(self._pool) < self.pool_size:
+                self._pool.append(conn)
+            else:
+                await conn.close()
+                self._created_connections -= 1
+
+    async def _create_connection(self) -> aiosqlite.Connection:
+        """Create optimized database connection"""
+        conn = await aiosqlite.connect(self.db_path)
+        conn.row_factory = aiosqlite.Row
+
+        # Optimize SQLite settings
+        await conn.execute("PRAGMA foreign_keys = ON")
+        await conn.execute("PRAGMA journal_mode = WAL")
+        await conn.execute("PRAGMA synchronous = NORMAL")
+        await conn.execute("PRAGMA cache_size = 10000")
+        await conn.execute("PRAGMA temp_store = MEMORY")
+        await conn.execute("PRAGMA mmap_size = 268435456")  # 256MB
+        await conn.execute("PRAGMA page_size = 4096")
+
+        return conn
+
+    async def close_all(self):
+        """Close all connections in pool"""
+        async with self._lock:
+            for conn in self._pool:
+                await conn.close()
+            self._pool.clear()
+            self._created_connections = 0
+
 class DatabaseService:
-    """Enhanced database service with async operations and connection pooling"""
-    
+    """Enhanced database service with async operations and optimized connection pooling"""
+
     def __init__(self, db_path: str = DB_FILE):
         self.db_path = db_path
-        self._connection_pool = []
-        self._pool_size = 5
-        self._lock = asyncio.Lock()
+        self._pool = ConnectionPool(db_path, pool_size=5)
         self._initialized = False
+        self._cache = {}
+        self._cache_ttl = {}
+        self._query_stats = {
+            'total_queries': 0,
+            'total_time': 0.0,
+            'slow_queries': 0
+        }
     
     async def initialize(self):
         """Initialize database with schema and connection pool"""
         if self._initialized:
             return
-        
+
         try:
             # Create database directory if it doesn't exist
             os.makedirs(os.path.dirname(self.db_path) if os.path.dirname(self.db_path) else '.', exist_ok=True)
-            
+
             # Initialize schema
             await self._create_schema()
-            
-            # Create connection pool
-            await self._create_connection_pool()
-            
+
             # Run migrations
             await self._run_migrations()
-            
+
             self._initialized = True
             logger.info("Database initialized successfully")
-            
+
         except Exception as e:
             logger.error(f"Failed to initialize database: {str(e)}", exc_info=True)
             raise DatabaseException(f"Database initialization failed: {str(e)}")
-    
-    async def _create_connection_pool(self):
-        """Create connection pool for better performance"""
-        async with self._lock:
-            for _ in range(self._pool_size):
-                conn = await aiosqlite.connect(self.db_path)
-                conn.row_factory = aiosqlite.Row
-                await conn.execute("PRAGMA foreign_keys = ON")
-                await conn.execute("PRAGMA journal_mode = WAL")
-                await conn.execute("PRAGMA synchronous = NORMAL")
-                await conn.execute("PRAGMA cache_size = 10000")
-                await conn.execute("PRAGMA temp_store = MEMORY")
-                self._connection_pool.append(conn)
-    
+
     @asynccontextmanager
     async def get_connection(self):
-        """Get connection from pool"""
-        async with self._lock:
-            if not self._connection_pool:
-                # Create new connection if pool is empty
-                conn = await aiosqlite.connect(self.db_path)
-                conn.row_factory = aiosqlite.Row
-                await conn.execute("PRAGMA foreign_keys = ON")
-            else:
-                conn = self._connection_pool.pop()
-        
+        """Get connection from optimized pool"""
+        conn = await self._pool.get_connection()
         try:
             yield conn
         finally:
-            async with self._lock:
-                if len(self._connection_pool) < self._pool_size:
-                    self._connection_pool.append(conn)
-                else:
-                    await conn.close()
+            await self._pool.return_connection(conn)
+
+    async def execute_query(self, query: str, params: tuple = None,
+                           fetch_one: bool = False, fetch_all: bool = False) -> QueryResult:
+        """Execute query with performance tracking and error handling"""
+        start_time = time.time()
+
+        try:
+            async with self.get_connection() as conn:
+                cursor = await conn.execute(query, params or ())
+
+                result = None
+                rows_affected = cursor.rowcount
+
+                if fetch_one:
+                    result = await cursor.fetchone()
+                elif fetch_all:
+                    result = await cursor.fetchall()
+
+                await conn.commit()
+
+                execution_time = time.time() - start_time
+
+                # Track query statistics
+                self._query_stats['total_queries'] += 1
+                self._query_stats['total_time'] += execution_time
+
+                if execution_time > 1.0:  # Slow query threshold
+                    self._query_stats['slow_queries'] += 1
+                    logger.warning(f"Slow query detected: {execution_time:.2f}s - {query[:100]}...")
+
+                return QueryResult(
+                    data=result,
+                    execution_time=execution_time,
+                    rows_affected=rows_affected
+                )
+
+        except Exception as e:
+            execution_time = time.time() - start_time
+            logger.error(f"Query failed after {execution_time:.2f}s: {str(e)} - Query: {query[:100]}...")
+            raise DatabaseException(f"Query execution failed: {str(e)}")
+
+    def _get_cache_key(self, query: str, params: tuple = None) -> str:
+        """Generate cache key for query"""
+        return f"{hash(query)}_{hash(params) if params else 'none'}"
+
+    async def execute_cached_query(self, query: str, params: tuple = None,
+                                  cache_ttl: int = 300, fetch_one: bool = False,
+                                  fetch_all: bool = False) -> QueryResult:
+        """Execute query with caching support"""
+        cache_key = self._get_cache_key(query, params)
+
+        # Check cache
+        if cache_key in self._cache:
+            if time.time() < self._cache_ttl.get(cache_key, 0):
+                logger.debug(f"Cache hit for query: {query[:50]}...")
+                return self._cache[cache_key]
+            else:
+                # Cache expired
+                del self._cache[cache_key]
+                del self._cache_ttl[cache_key]
+
+        # Execute query and cache result
+        result = await self.execute_query(query, params, fetch_one, fetch_all)
+
+        # Only cache SELECT queries
+        if query.strip().upper().startswith('SELECT'):
+            self._cache[cache_key] = result
+            self._cache_ttl[cache_key] = time.time() + cache_ttl
+
+        return result
+
+    async def close(self):
+        """Close all database connections"""
+        await self._pool.close_all()
+        self._initialized = False
+        logger.info("Database connections closed")
     
     async def _create_schema(self):
         """Create database schema with indexes"""
@@ -262,64 +390,65 @@ class DatabaseService:
                 logger.info(f"Database schema initialized with version {DB_SCHEMA_VERSION}")
     
     # User Management Methods
-    async def create_user(self, user_id: int, username: str = None, 
+    async def create_user(self, user_id: int, username: str = None,
                          first_name: str = None, last_name: str = None) -> bool:
-        """Create a new user"""
+        """Create a new user with optimized query execution"""
         try:
-            async with self.get_connection() as conn:
-                await conn.execute("""
-                    INSERT OR IGNORE INTO users 
-                    (user_id, username, first_name, last_name, settings)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (user_id, username, first_name, last_name, json.dumps(DEFAULT_USER_SETTINGS)))
-                await conn.commit()
-                return True
+            result = await self.execute_query("""
+                INSERT OR IGNORE INTO users
+                (user_id, username, first_name, last_name, settings)
+                VALUES (?, ?, ?, ?, ?)
+            """, (user_id, username, first_name, last_name, json.dumps(DEFAULT_USER_SETTINGS)))
+
+            logger.debug(f"User {user_id} created/updated in {result.execution_time:.3f}s")
+            return result.rows_affected > 0
+
         except Exception as e:
             logger.error(f"Failed to create user {user_id}: {str(e)}", exc_info=True)
             raise DatabaseException(f"Failed to create user: {str(e)}")
-    
+
     async def update_user_activity(self, user_id: int, username: str = None,
                                   first_name: str = None, last_name: str = None):
-        """Update user's last active time and info"""
+        """Update user's last active time and info with optimized query"""
         try:
-            async with self.get_connection() as conn:
-                await conn.execute("""
-                    INSERT INTO users (user_id, username, first_name, last_name, last_active)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(user_id) DO UPDATE SET
-                        last_active = CURRENT_TIMESTAMP,
-                        username = COALESCE(?, username),
-                        first_name = COALESCE(?, first_name),
-                        last_name = COALESCE(?, last_name),
-                        updated_at = CURRENT_TIMESTAMP
-                """, (user_id, username, first_name, last_name, username, first_name, last_name))
-                await conn.commit()
+            result = await self.execute_query("""
+                INSERT INTO users (user_id, username, first_name, last_name, last_active)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    last_active = CURRENT_TIMESTAMP,
+                    username = COALESCE(?, username),
+                    first_name = COALESCE(?, first_name),
+                    last_name = COALESCE(?, last_name),
+                    updated_at = CURRENT_TIMESTAMP
+            """, (user_id, username, first_name, last_name, username, first_name, last_name))
+
+            logger.debug(f"User {user_id} activity updated in {result.execution_time:.3f}s")
+
         except Exception as e:
             logger.error(f"Failed to update user activity for {user_id}: {str(e)}", exc_info=True)
             raise DatabaseException(f"Failed to update user activity: {str(e)}")
     
     async def get_user_profile(self, user_id: int) -> Optional[Dict[str, Any]]:
-        """Get user profile and statistics"""
+        """Get user profile and statistics with caching"""
         try:
-            async with self.get_connection() as conn:
-                cursor = await conn.execute("""
-                    SELECT user_id, username, first_name, last_name, first_seen, 
-                           last_active, daily_quota, downloads_today, total_downloads, 
-                           quota_reset_at, settings, is_banned, ban_reason
-                    FROM users WHERE user_id = ?
-                """, (user_id,))
-                row = await cursor.fetchone()
-                
-                if not row:
-                    return None
-                
-                return {
-                    "user_id": row["user_id"],
-                    "username": row["username"],
-                    "first_name": row["first_name"],
-                    "last_name": row["last_name"],
-                    "first_seen": row["first_seen"],
-                    "last_active": row["last_active"],
+            result = await self.execute_cached_query("""
+                SELECT user_id, username, first_name, last_name, first_seen,
+                       last_active, daily_quota, downloads_today, total_downloads,
+                       quota_reset_at, settings, is_banned, ban_reason
+                FROM users WHERE user_id = ?
+            """, (user_id,), cache_ttl=300, fetch_one=True)
+
+            if not result.data:
+                return None
+
+            row = result.data
+            return {
+                "user_id": row["user_id"],
+                "username": row["username"],
+                "first_name": row["first_name"],
+                "last_name": row["last_name"],
+                "first_seen": row["first_seen"],
+                "last_active": row["last_active"],
                     "daily_quota": row["daily_quota"],
                     "downloads_today": row["downloads_today"],
                     "total_downloads": row["total_downloads"],

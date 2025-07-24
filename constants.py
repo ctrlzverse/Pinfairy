@@ -127,12 +127,41 @@ LOG_DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
 LOG_MAX_BYTES = 10 * 1024 * 1024  # 10MB
 LOG_BACKUP_COUNT = 5
 
-# Cache Configuration
+# Enhanced Cache Configuration
 CACHE_TTL = {
-    "user_settings": 300,  # 5 minutes
-    "stats": 60,  # 1 minute
-    "pinterest_data": 1800,  # 30 minutes
-    "board_data": 3600  # 1 hour
+    "user_settings": 300,        # 5 minutes
+    "stats": 60,                 # 1 minute
+    "pinterest_data": 1800,      # 30 minutes
+    "board_data": 3600,          # 1 hour
+    "url_validation": 7200,      # 2 hours
+    "media_metadata": 3600,      # 1 hour
+    "rate_limit": 60,            # 1 minute
+    "quota_check": 300,          # 5 minutes
+    "system_stats": 120,         # 2 minutes
+    "user_profile": 300,         # 5 minutes
+    "search_results": 900        # 15 minutes
+}
+
+# Database optimization settings
+DB_OPTIMIZATION = {
+    "connection_pool_size": 10,
+    "max_connections": 20,
+    "query_timeout": 30,
+    "slow_query_threshold": 1.0,  # seconds
+    "cache_size": 10000,
+    "page_size": 4096,
+    "journal_mode": "WAL",
+    "synchronous": "NORMAL"
+}
+
+# Performance monitoring settings
+PERFORMANCE_MONITORING = {
+    "enable_metrics": True,
+    "metrics_interval": 60,           # seconds
+    "slow_operation_threshold": 2.0,  # seconds
+    "memory_warning_threshold": 500,  # MB
+    "cpu_warning_threshold": 80,      # percentage
+    "disk_warning_threshold": 90      # percentage
 }
 
 # Regex Patterns

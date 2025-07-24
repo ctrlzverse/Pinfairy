@@ -8,15 +8,19 @@ import httpx
 import json
 import re
 import time
-from typing import Dict, List, Optional, Any, Tuple
+import hashlib
+from typing import Dict, List, Optional, Any, Tuple, Set
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, Browser, Page
 from urllib.parse import quote_plus
+from dataclasses import dataclass
+from contextlib import asynccontextmanager
 
 from constants import (
     PINTEREST_HEADERS, PINTEREST_API_ENDPOINT, PINTEREST_SEARCH_ENDPOINT,
     MAX_RETRY_ATTEMPTS, RETRY_DELAY_BASE, CONNECTION_TIMEOUT, READ_TIMEOUT,
-    URL_PATTERNS, QUALITY_SETTINGS, MIN_IMAGE_RESOLUTION, BROWSER_CONFIG
+    URL_PATTERNS, QUALITY_SETTINGS, MIN_IMAGE_RESOLUTION, BROWSER_CONFIG,
+    CACHE_TTL
 )
 from exceptions import (
     PinterestAPIException, InvalidURLException, DeadLinkException,
@@ -27,77 +31,312 @@ from services.database import db_service
 
 logger = get_logger(__name__)
 
+@dataclass
+class PinterestMedia:
+    """Structured Pinterest media data"""
+    url: str
+    media_type: str  # 'photo', 'video', 'board'
+    title: str = ""
+    description: str = ""
+    media_url: str = ""
+    thumbnail_url: str = ""
+    resolution: Tuple[int, int] = (0, 0)
+    file_size: int = 0
+    quality: str = "high"
+
+class CacheManager:
+    """Manages caching for Pinterest data"""
+
+    def __init__(self):
+        self._cache: Dict[str, Any] = {}
+        self._cache_times: Dict[str, float] = {}
+        self._max_cache_size = 1000
+
+    def _generate_key(self, url: str, params: Dict = None) -> str:
+        """Generate cache key from URL and parameters"""
+        key_data = f"{url}_{json.dumps(params, sort_keys=True) if params else ''}"
+        return hashlib.md5(key_data.encode()).hexdigest()
+
+    def get(self, url: str, params: Dict = None, ttl: int = CACHE_TTL["pinterest_data"]) -> Optional[Any]:
+        """Get cached data if not expired"""
+        key = self._generate_key(url, params)
+
+        if key in self._cache:
+            if time.time() - self._cache_times[key] < ttl:
+                logger.debug(f"Cache hit for {url[:50]}...")
+                return self._cache[key]
+            else:
+                # Expired
+                del self._cache[key]
+                del self._cache_times[key]
+
+        return None
+
+    def set(self, url: str, data: Any, params: Dict = None):
+        """Cache data with size management"""
+        key = self._generate_key(url, params)
+
+        # Manage cache size
+        if len(self._cache) >= self._max_cache_size:
+            # Remove oldest entries
+            oldest_keys = sorted(self._cache_times.keys(), key=lambda k: self._cache_times[k])[:100]
+            for old_key in oldest_keys:
+                del self._cache[old_key]
+                del self._cache_times[old_key]
+
+        self._cache[key] = data
+        self._cache_times[key] = time.time()
+        logger.debug(f"Cached data for {url[:50]}...")
+
+    def clear(self):
+        """Clear all cached data"""
+        self._cache.clear()
+        self._cache_times.clear()
+
+class ConnectionPool:
+    """HTTP connection pool for Pinterest requests"""
+
+    def __init__(self, max_connections: int = 10):
+        self._clients: List[httpx.AsyncClient] = []
+        self._max_connections = max_connections
+        self._lock = asyncio.Lock()
+
+    async def get_client(self) -> httpx.AsyncClient:
+        """Get HTTP client from pool"""
+        async with self._lock:
+            if self._clients:
+                return self._clients.pop()
+
+            # Create new client
+            client = httpx.AsyncClient(
+                headers=PINTEREST_HEADERS,
+                timeout=httpx.Timeout(
+                    connect=CONNECTION_TIMEOUT,
+                    read=READ_TIMEOUT,
+                    write=30.0,
+                    pool=60.0
+                ),
+                limits=httpx.Limits(
+                    max_keepalive_connections=20,
+                    max_connections=50
+                ),
+                follow_redirects=True
+            )
+            return client
+
+    async def return_client(self, client: httpx.AsyncClient):
+        """Return client to pool"""
+        async with self._lock:
+            if len(self._clients) < self._max_connections:
+                self._clients.append(client)
+            else:
+                await client.aclose()
+
+    async def close_all(self):
+        """Close all clients in pool"""
+        async with self._lock:
+            for client in self._clients:
+                await client.aclose()
+            self._clients.clear()
+
 class RetryMixin:
-    """Mixin class for retry functionality with exponential backoff"""
-    
-    @staticmethod
-    async def retry_with_backoff(func, *args, max_retries: int = MAX_RETRY_ATTEMPTS, 
+    """Enhanced retry functionality with exponential backoff and circuit breaker"""
+
+    def __init__(self):
+        self._failure_counts: Dict[str, int] = {}
+        self._last_failure_times: Dict[str, float] = {}
+        self._circuit_breaker_threshold = 5
+        self._circuit_breaker_timeout = 300  # 5 minutes
+
+    def _get_circuit_key(self, func_name: str, *args) -> str:
+        """Generate circuit breaker key"""
+        return f"{func_name}_{hash(str(args))}"
+
+    def _is_circuit_open(self, circuit_key: str) -> bool:
+        """Check if circuit breaker is open"""
+        if circuit_key not in self._failure_counts:
+            return False
+
+        failure_count = self._failure_counts[circuit_key]
+        last_failure = self._last_failure_times.get(circuit_key, 0)
+
+        if failure_count >= self._circuit_breaker_threshold:
+            if time.time() - last_failure < self._circuit_breaker_timeout:
+                return True
+            else:
+                # Reset circuit breaker
+                self._failure_counts[circuit_key] = 0
+                return False
+
+        return False
+
+    def _record_failure(self, circuit_key: str):
+        """Record failure for circuit breaker"""
+        self._failure_counts[circuit_key] = self._failure_counts.get(circuit_key, 0) + 1
+        self._last_failure_times[circuit_key] = time.time()
+
+    def _record_success(self, circuit_key: str):
+        """Record success for circuit breaker"""
+        if circuit_key in self._failure_counts:
+            del self._failure_counts[circuit_key]
+        if circuit_key in self._last_failure_times:
+            del self._last_failure_times[circuit_key]
+
+    async def retry_with_backoff(self, func, *args, max_retries: int = MAX_RETRY_ATTEMPTS,
                                base_delay: float = RETRY_DELAY_BASE, **kwargs):
-        """Execute function with exponential backoff retry"""
+        """Execute function with exponential backoff retry and circuit breaker"""
+        circuit_key = self._get_circuit_key(func.__name__, *args)
+
+        # Check circuit breaker
+        if self._is_circuit_open(circuit_key):
+            raise PinterestAPIException(f"Circuit breaker open for {func.__name__}")
+
         last_exception = None
-        
+
         for attempt in range(max_retries):
             try:
-                return await func(*args, **kwargs)
-            except Exception as e:
+                result = await func(*args, **kwargs)
+                self._record_success(circuit_key)
+                return result
+
+            except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.NetworkError) as e:
                 last_exception = e
+                self._record_failure(circuit_key)
+
                 if attempt == max_retries - 1:
                     break
-                
-                delay = base_delay * (2 ** attempt)
-                logger.warning(f"Attempt {attempt + 1} failed: {str(e)}. Retrying in {delay}s...")
+
+                delay = min(base_delay * (2 ** attempt), 60)  # Cap at 60 seconds
+                logger.warning(f"Network error on attempt {attempt + 1}: {str(e)}. Retrying in {delay}s...")
                 await asyncio.sleep(delay)
-        
+
+            except Exception as e:
+                # Don't retry on non-network errors
+                self._record_failure(circuit_key)
+                raise e
+
+        self._record_failure(circuit_key)
         raise last_exception
 
 class BrowserManager:
-    """Manages browser instances for Pinterest scraping"""
-    
+    """Enhanced browser manager with connection pooling and resource optimization"""
+
+    _instance = None
+    _lock = asyncio.Lock()
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
     def __init__(self):
+        if hasattr(self, '_initialized'):
+            return
+
         self._browser: Optional[Browser] = None
         self._playwright = None
         self.browserless_token = None
-        
+        self._page_pool: List[Page] = []
+        self._max_pages = 3
+        self._initialized = False
+
     async def __aenter__(self):
         await self.initialize()
         return self
-    
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
-    
+
     async def initialize(self):
-        """Initialize browser instance"""
-        try:
-            import os
-            self.browserless_token = os.getenv("BROWSERLESS_TOKEN")
-            
-            self._playwright = await async_playwright().start()
-            
-            if self.browserless_token:
-                logger.info("Connecting to remote browser via browserless.io")
-                endpoint = f"wss://chrome.browserless.io?token={self.browserless_token}"
-                self._browser = await self._playwright.chromium.connect_over_cdp(endpoint)
+        """Initialize browser instance with optimization"""
+        if self._initialized:
+            return
+
+        async with self._lock:
+            if self._initialized:
+                return
+
+            try:
+                import os
+                self.browserless_token = os.getenv("BROWSERLESS_TOKEN")
+
+                self._playwright = await async_playwright().start()
+
+                if self.browserless_token:
+                    logger.info("Connecting to remote browser via browserless.io")
+                    endpoint = f"wss://chrome.browserless.io?token={self.browserless_token}"
+                    self._browser = await self._playwright.chromium.connect_over_cdp(endpoint)
+                else:
+                    logger.info("Launching local browser with optimizations")
+                    self._browser = await self._playwright.chromium.launch(
+                        headless=BROWSER_CONFIG["headless"],
+                        args=[
+                            '--no-sandbox',
+                            '--disable-setuid-sandbox',
+                            '--disable-dev-shm-usage',
+                            '--disable-accelerated-2d-canvas',
+                            '--no-first-run',
+                            '--no-zygote',
+                            '--disable-gpu',
+                            '--disable-background-timer-throttling',
+                            '--disable-backgrounding-occluded-windows',
+                            '--disable-renderer-backgrounding'
+                        ]
+                    )
+
+                self._initialized = True
+                logger.info("Browser initialized successfully")
+
+            except Exception as e:
+                logger.error(f"Failed to initialize browser: {str(e)}", exc_info=True)
+                raise BrowserException(f"Browser initialization failed: {str(e)}")
+
+    async def get_page(self) -> Page:
+        """Get page from pool or create new one"""
+        async with self._lock:
+            if self._page_pool:
+                page = self._page_pool.pop()
+                # Check if page is still valid
+                try:
+                    await page.evaluate("1 + 1")
+                    return page
+                except Exception:
+                    # Page is invalid, create new one
+                    pass
+
+        return await self.create_page()
+
+    async def return_page(self, page: Page):
+        """Return page to pool"""
+        async with self._lock:
+            if len(self._page_pool) < self._max_pages:
+                try:
+                    # Clear page state
+                    await page.goto("about:blank")
+                    self._page_pool.append(page)
+                except Exception:
+                    await page.close()
             else:
-                logger.info("Launching local browser")
-                self._browser = await self._playwright.chromium.launch(
-                    headless=BROWSER_CONFIG["headless"]
-                )
-                
-        except Exception as e:
-            logger.error(f"Failed to initialize browser: {str(e)}", exc_info=True)
-            raise BrowserException(f"Browser initialization failed: {str(e)}")
-    
+                await page.close()
+
     async def create_page(self) -> Page:
         """Create a new browser page with optimized settings"""
         if not self._browser:
             await self.initialize()
-        
+
         page = await self._browser.new_page(
             viewport=BROWSER_CONFIG["viewport"],
             user_agent=BROWSER_CONFIG["user_agent"]
         )
-        
+
         # Block unnecessary resources for faster loading
+        await page.route("**/*.{png,jpg,jpeg,gif,svg,css,woff,woff2}", lambda route: route.abort())
+
+        # Set optimized timeouts
+        page.set_default_timeout(BROWSER_CONFIG["timeout"])
+        page.set_default_navigation_timeout(BROWSER_CONFIG["timeout"])
+
+        return page
         await page.route("**/*.{png,jpg,jpeg,gif,svg,css,woff,woff2}", lambda route: route.abort())
         
         return page
@@ -113,49 +352,96 @@ class BrowserManager:
             logger.error(f"Error closing browser: {str(e)}")
 
 class PinterestService(RetryMixin):
-    """Enhanced Pinterest service with comprehensive functionality"""
-    
+    """Enhanced Pinterest service with comprehensive functionality and optimization"""
+
     def __init__(self):
-        self.session: Optional[httpx.AsyncClient] = None
-        self._cache_enabled = True
-    
+        super().__init__()
+        self._connection_pool = ConnectionPool(max_connections=10)
+        self._cache_manager = CacheManager()
+        self._browser_manager = BrowserManager()
+        self._rate_limiter = {}
+        self._last_request_times = {}
+        self._request_count = 0
+        self._session_start_time = time.time()
+
     async def __aenter__(self):
         await self.initialize()
         return self
-    
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
-    
+
     async def initialize(self):
-        """Initialize HTTP session"""
-        self.session = httpx.AsyncClient(
-            headers=PINTEREST_HEADERS,
-            timeout=httpx.Timeout(CONNECTION_TIMEOUT, read=READ_TIMEOUT),
-            follow_redirects=True,
-            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100)
-        )
-    
+        """Initialize service components"""
+        await self._browser_manager.initialize()
+        logger.info("Pinterest service initialized")
+
     async def close(self):
-        """Close HTTP session"""
-        if self.session:
-            await self.session.aclose()
-    
-    async def _get_cached_data(self, cache_key: str) -> Optional[Dict[str, Any]]:
-        """Get cached data if available"""
-        if not self._cache_enabled:
-            return None
-        
+        """Close all service components"""
+        await self._connection_pool.close_all()
+        await self._browser_manager.close()
+        logger.info("Pinterest service closed")
+
+    async def _rate_limit_check(self, endpoint: str):
+        """Check and enforce rate limiting"""
+        current_time = time.time()
+
+        # Global rate limiting
+        if endpoint in self._last_request_times:
+            time_since_last = current_time - self._last_request_times[endpoint]
+            if time_since_last < 1.0:  # 1 second between requests to same endpoint
+                await asyncio.sleep(1.0 - time_since_last)
+
+        self._last_request_times[endpoint] = current_time
+        self._request_count += 1
+
+        # Log rate limiting stats
+        if self._request_count % 100 == 0:
+            session_time = current_time - self._session_start_time
+            rate = self._request_count / session_time if session_time > 0 else 0
+            logger.info(f"Request rate: {rate:.2f} req/s ({self._request_count} total)")
+
+    async def _make_request(self, url: str, method: str = "GET", **kwargs) -> httpx.Response:
+        """Make HTTP request with connection pooling and rate limiting"""
+        await self._rate_limit_check(url)
+
+        client = await self._connection_pool.get_client()
         try:
-            return await db_service.get_cache(cache_key)
+            response = await client.request(method, url, **kwargs)
+            response.raise_for_status()
+            return response
+        finally:
+            await self._connection_pool.return_client(client)
+
+    def _get_cache_key(self, url: str, params: Dict = None) -> str:
+        """Generate cache key for URL and parameters"""
+        return self._cache_manager._generate_key(url, params)
+
+    async def _get_cached_data(self, cache_key: str, ttl: int = CACHE_TTL["pinterest_data"]) -> Optional[Dict[str, Any]]:
+        """Get cached data with fallback to database cache"""
+        # Try memory cache first
+        cached = self._cache_manager.get(cache_key, ttl=ttl)
+        if cached:
+            return cached
+
+        # Try database cache
+        try:
+            db_cached = await db_service.get_cache(cache_key)
+            if db_cached:
+                # Store in memory cache for faster access
+                self._cache_manager.set(cache_key, db_cached)
+                return db_cached
         except Exception as e:
-            logger.warning(f"Cache retrieval failed: {str(e)}")
-            return None
-    
-    async def _set_cached_data(self, cache_key: str, data: Dict[str, Any], ttl: int = 1800):
-        """Set cached data"""
-        if not self._cache_enabled:
-            return
-        
+            logger.warning(f"Database cache retrieval failed: {str(e)}")
+
+        return None
+
+    async def _set_cached_data(self, cache_key: str, data: Dict[str, Any], ttl: int = CACHE_TTL["pinterest_data"]):
+        """Set cached data in both memory and database"""
+        # Store in memory cache
+        self._cache_manager.set(cache_key, data)
+
+        # Store in database cache
         try:
             await db_service.set_cache(cache_key, data, ttl)
         except Exception as e:
